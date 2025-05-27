@@ -13,7 +13,7 @@ security = HTTPBearer()
 class AuthManager:
     def __init__(self):
         # Load API keys from environment
-        self.master_api_key = os.getenv("MASTER_API_KEY", "your-secret-master-key")
+        self.master_api_key = os.getenv("MASTER_API_KEY", "master-dev-key")
         self.api_keys = self._load_api_keys()
         
     def _load_api_keys(self) -> set:
@@ -21,7 +21,7 @@ class AuthManager:
         keys = set()
         
         # Add master key if provided
-        if self.master_api_key and self.master_api_key != "your-secret-master-key":
+        if self.master_api_key:
             keys.add(self.master_api_key)
         
         # Add additional keys from environment (comma-separated)
@@ -38,16 +38,13 @@ class AuthManager:
         ]
         keys.update(dev_keys)
         
-        # Add a simple master key for development
-        keys.add("master-dev-key")
-        
-        print(f"Loaded API keys: {[f'{key[:8]}...' for key in keys]}")
+        print(f"✅ Loaded {len(keys)} API keys for authentication")
         return keys
     
     def verify_api_key(self, api_key: str) -> bool:
         """Verify if the provided API key is valid"""
         is_valid = api_key in self.api_keys
-        print(f"Verifying API key {api_key[:8]}...: {'Valid' if is_valid else 'Invalid'}")
+        print(f"🔐 Verifying API key {api_key[:8]}...: {'✅ Valid' if is_valid else '❌ Invalid'}")
         return is_valid
     
     def generate_api_key(self) -> str:
@@ -68,7 +65,7 @@ class AuthManager:
     
     def list_api_keys(self) -> list:
         """List all API keys (masked for security)"""
-        return [f"{key[:8]}...{key[-4:]}" for key in self.api_keys]
+        return [f"{key[:8]}...{key[-4:]}" if len(key) > 12 else f"{key[:4]}..." for key in self.api_keys]
 
 # Global auth manager instance
 auth_manager = AuthManager()
@@ -115,7 +112,7 @@ def verify_api_key_header(api_key: Optional[str] = None) -> str:
     
     return api_key
 
-# Optional: Rate limiting per API key
+# Rate limiting per API key
 class RateLimiter:
     def __init__(self):
         self.requests = {}  # api_key -> list of timestamps
@@ -155,7 +152,6 @@ def check_rate_limit(api_key: str = Depends(verify_api_key)) -> str:
         )
     return api_key
 
-print("Authentication module loaded:")
-print(f"- Master API key configured: {'Yes' if auth_manager.master_api_key else 'No'}")
-print(f"- Total API keys loaded: {len(auth_manager.api_keys)}")
+print("✅ Authentication module loaded:")
+print(f"- API keys configured: {len(auth_manager.api_keys)}")
 print(f"- Rate limiting: {rate_limiter.max_requests} requests per {rate_limiter.time_window} seconds")
