@@ -9,6 +9,7 @@ import asyncio
 from typing import Optional
 import logging
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
 # Load environment variables
 load_dotenv()
@@ -23,45 +24,21 @@ from auth import verify_api_key, check_rate_limit, auth_manager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create database tables safely
-try:
-    Base.metadata.create_all(bind=engine)
-    logger.info("✅ Database tables created successfully")
-except Exception as e:
-    logger.error(f"❌ Error creating database tables: {str(e)}")
-
-app = FastAPI(
-    title="Q&A API with RAG and Neon Database",
-    description="A FastAPI backend with Retrieval-Augmented Generation using OpenAI and Neon PostgreSQL",
-    version="3.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
-
-# Add CORS middleware with permissive settings for development
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific domains
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Initialize RAG service
 rag_service = RAGService()
 
-# Dependency to get database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-@app.on_startup
-async def startup_event():
-    """Initialize the application on startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager (replaces deprecated on_startup)"""
+    # Startup
     logger.info("🚀 Starting Q&A API with RAG...")
+    
+    # Create database tables safely
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Database tables created successfully")
+    except Exception as e:
+        logger.error(f"❌ Error creating database tables: {str(e)}")
     
     # Check DATABASE_URL
     database_url = os.getenv("DATABASE_URL")
@@ -88,6 +65,37 @@ async def startup_event():
     
     # Check auth
     logger.info(f"🔐 Authentication: {len(auth_manager.api_keys)} API keys loaded")
+    
+    yield
+    
+    # Shutdown
+    logger.info("🛑 Shutting down Q&A API...")
+
+app = FastAPI(
+    title="Q&A API with RAG and Neon Database",
+    description="A FastAPI backend with Retrieval-Augmented Generation using OpenAI and Neon PostgreSQL",
+    version="3.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan
+)
+
+# Add CORS middleware with permissive settings for development
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with specific domains
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Dependency to get database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 @app.get("/")
 def read_root():
