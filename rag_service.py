@@ -11,10 +11,20 @@ class RAGService:
         """Initialize the RAG service with OpenAI client"""
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if self.openai_api_key:
-            self.openai_client = openai.OpenAI(api_key=self.openai_api_key)
+            try:
+                # Initialize OpenAI client with proper configuration
+                self.openai_client = openai.OpenAI(
+                    api_key=self.openai_api_key,
+                    timeout=30.0,  # 30 second timeout
+                    max_retries=3   # Retry failed requests 3 times
+                )
+                print("✅ OpenAI client initialized successfully")
+            except Exception as e:
+                print(f"❌ Error initializing OpenAI client: {str(e)}")
+                self.openai_client = None
         else:
             self.openai_client = None
-            print("Warning: OPENAI_API_KEY not found. RAG functionality will be limited.")
+            print("⚠️ OPENAI_API_KEY not found. RAG functionality will run in demo mode.")
         
         self.embedding_dimension = 1536  # text-embedding-ada-002 dimension
         self.similarity_threshold = 0.8
@@ -24,22 +34,36 @@ class RAGService:
         if not self.openai_client:
             # Return a dummy embedding for demo purposes
             print(f"🎭 Generating demo embedding for: {text[:50]}...")
-            return np.random.rand(self.embedding_dimension)
+            # Create a consistent dummy embedding based on text hash for demo
+            import hashlib
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            np.random.seed(int(text_hash[:8], 16))  # Consistent seed based on text
+            embedding = np.random.rand(self.embedding_dimension)
+            return embedding
         
         try:
             print(f"🤖 Generating OpenAI embedding for: {text[:50]}...")
+            
+            # Use the correct method for the current OpenAI library
             response = self.openai_client.embeddings.create(
                 model="text-embedding-ada-002",
-                input=text
+                input=text,
+                encoding_format="float"
             )
+            
             embedding = np.array(response.data[0].embedding)
             print(f"✅ Embedding generated successfully (dimension: {len(embedding)})")
             return embedding
+            
         except Exception as e:
             print(f"❌ Error generating embedding: {str(e)}")
-            # Return a dummy embedding as fallback
             print("🎭 Falling back to demo embedding")
-            return np.random.rand(self.embedding_dimension)
+            # Return a consistent dummy embedding as fallback
+            import hashlib
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            np.random.seed(int(text_hash[:8], 16))
+            embedding = np.random.rand(self.embedding_dimension)
+            return embedding
     
     async def find_similar_question(
         self, 
@@ -73,6 +97,11 @@ class RAGService:
                         vector = np.array([float(x) for x in emb.vector])
                     else:
                         vector = np.array(emb.vector)
+                    
+                    # Ensure vector has correct dimension
+                    if len(vector) != self.embedding_dimension:
+                        print(f"⚠️ Skipping embedding {emb.id}: wrong dimension {len(vector)}")
+                        continue
                     
                     stored_embeddings.append(vector)
                     question = db.query(Question).filter(Question.id == emb.question_id).first()
@@ -120,7 +149,12 @@ This is a demonstration response. To get AI-powered answers, please configure yo
 - Provide accurate information based on the question
 - Maintain conversation context and follow-up capabilities
 
-**Current Status:** Demo mode - showing system functionality without AI costs."""
+**Current Status:** Demo mode - showing system functionality without AI costs.
+
+**System Info:**
+- Platform: Render.com
+- Database: Neon PostgreSQL  
+- Status: Fully operational in demo mode"""
         
         try:
             print(f"🧠 Generating AI answer for: {question[:50]}...")
@@ -138,7 +172,8 @@ This is a demonstration response. To get AI-powered answers, please configure yo
                     }
                 ],
                 max_tokens=500,
-                temperature=0.7
+                temperature=0.7,
+                timeout=30.0
             )
             
             answer = response.choices[0].message.content.strip()
@@ -150,6 +185,8 @@ This is a demonstration response. To get AI-powered answers, please configure yo
             return f"""I apologize, but I encountered an error while generating an answer to your question: "{question}". 
 
 **Error details:** {str(e)}
+
+**Fallback response:** This appears to be a question about {question[:50]}... In a fully configured system, I would provide a comprehensive answer using GPT-4.
 
 Please try again later or contact support if the issue persists."""
     
@@ -171,6 +208,6 @@ Please try again later or contact support if the issue persists."""
 
 print("✅ RAG Service initialized:")
 print(f"- OpenAI client configured: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No (demo mode)'}")
-print("- Using scikit-learn for cosine similarity (no FAISS required)")
+print("- Using scikit-learn for cosine similarity")
 print("- Similarity threshold: 0.8")
 print("- Embedding dimension: 1536 (text-embedding-ada-002)")
