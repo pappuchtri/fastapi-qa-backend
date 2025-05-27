@@ -1,4 +1,3 @@
-import openai
 import numpy as np
 from typing import List, Tuple, Optional
 from sqlalchemy.orm import Session
@@ -10,21 +9,22 @@ class RAGService:
     def __init__(self):
         """Initialize the RAG service with OpenAI client"""
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.openai_client = None
+        
         if self.openai_api_key:
             try:
-                # Initialize OpenAI client with proper configuration
-                self.openai_client = openai.OpenAI(
-                    api_key=self.openai_api_key,
-                    timeout=30.0,  # 30 second timeout
-                    max_retries=3   # Retry failed requests 3 times
-                )
-                print("✅ OpenAI client initialized successfully")
+                # Import OpenAI only when needed to avoid initialization issues
+                import openai
+                
+                # Simple initialization without problematic parameters
+                openai.api_key = self.openai_api_key
+                self.openai_client = openai
+                print("✅ OpenAI API key configured successfully")
             except Exception as e:
-                print(f"❌ Error initializing OpenAI client: {str(e)}")
+                print(f"❌ Error configuring OpenAI: {str(e)}")
                 self.openai_client = None
         else:
-            self.openai_client = None
-            print("⚠️ OPENAI_API_KEY not found. RAG functionality will run in demo mode.")
+            print("⚠️ OPENAI_API_KEY not found. Running in demo mode.")
         
         self.embedding_dimension = 1536  # text-embedding-ada-002 dimension
         self.similarity_threshold = 0.8
@@ -32,9 +32,8 @@ class RAGService:
     async def generate_embedding(self, text: str) -> np.ndarray:
         """Generate embedding for given text using OpenAI text-embedding-ada-002"""
         if not self.openai_client:
-            # Return a dummy embedding for demo purposes
+            # Return a consistent dummy embedding for demo purposes
             print(f"🎭 Generating demo embedding for: {text[:50]}...")
-            # Create a consistent dummy embedding based on text hash for demo
             import hashlib
             text_hash = hashlib.md5(text.encode()).hexdigest()
             np.random.seed(int(text_hash[:8], 16))  # Consistent seed based on text
@@ -44,14 +43,13 @@ class RAGService:
         try:
             print(f"🤖 Generating OpenAI embedding for: {text[:50]}...")
             
-            # Use the correct method for the current OpenAI library
-            response = self.openai_client.embeddings.create(
+            # Use the older API style that's more compatible
+            response = self.openai_client.Embedding.create(
                 model="text-embedding-ada-002",
-                input=text,
-                encoding_format="float"
+                input=text
             )
             
-            embedding = np.array(response.data[0].embedding)
+            embedding = np.array(response['data'][0]['embedding'])
             print(f"✅ Embedding generated successfully (dimension: {len(embedding)})")
             return embedding
             
@@ -159,7 +157,7 @@ This is a demonstration response. To get AI-powered answers, please configure yo
         try:
             print(f"🧠 Generating AI answer for: {question[:50]}...")
             
-            response = self.openai_client.chat.completions.create(
+            response = self.openai_client.ChatCompletion.create(
                 model="gpt-4",
                 messages=[
                     {
@@ -172,11 +170,10 @@ This is a demonstration response. To get AI-powered answers, please configure yo
                     }
                 ],
                 max_tokens=500,
-                temperature=0.7,
-                timeout=30.0
+                temperature=0.7
             )
             
-            answer = response.choices[0].message.content.strip()
+            answer = response['choices'][0]['message']['content'].strip()
             print(f"✅ AI answer generated successfully ({len(answer)} characters)")
             return answer
             
@@ -207,7 +204,7 @@ Please try again later or contact support if the issue persists."""
             return 0.0
 
 print("✅ RAG Service initialized:")
-print(f"- OpenAI client configured: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No (demo mode)'}")
+print(f"- OpenAI configured: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No (demo mode)'}")
 print("- Using scikit-learn for cosine similarity")
 print("- Similarity threshold: 0.8")
 print("- Embedding dimension: 1536 (text-embedding-ada-002)")
