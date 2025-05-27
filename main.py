@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 import uvicorn
 from datetime import datetime
 import os
@@ -22,8 +23,12 @@ from auth import verify_api_key, check_rate_limit, auth_manager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create database tables
-Base.metadata.create_all(bind=engine)
+# Create database tables safely
+try:
+    Base.metadata.create_all(bind=engine)
+    logger.info("✅ Database tables created successfully")
+except Exception as e:
+    logger.error(f"❌ Error creating database tables: {str(e)}")
 
 app = FastAPI(
     title="Q&A API with RAG and Neon Database",
@@ -57,9 +62,32 @@ def get_db():
 async def startup_event():
     """Initialize the application on startup"""
     logger.info("🚀 Starting Q&A API with RAG...")
-    logger.info(f"📊 Database URL configured: {'Yes' if os.getenv('DATABASE_URL') else 'No'}")
-    logger.info(f"🤖 OpenAI API Key configured: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No (Demo mode)'}")
-    logger.info(f"🔐 Authentication configured: {'Yes' if auth_manager.api_keys else 'No'}")
+    
+    # Check DATABASE_URL
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        logger.info(f"📊 Database URL configured: {database_url[:30]}...")
+        try:
+            # Test database connection with proper text() wrapper
+            db = SessionLocal()
+            result = db.execute(text("SELECT 1"))
+            result.fetchone()
+            db.close()
+            logger.info("✅ Database connection successful!")
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {str(e)}")
+            logger.info("⚠️ App will continue - database errors handled at runtime")
+    else:
+        logger.error("❌ DATABASE_URL not configured!")
+    
+    # Check OpenAI
+    if os.getenv("OPENAI_API_KEY"):
+        logger.info("🤖 OpenAI API Key configured")
+    else:
+        logger.info("🎭 Running in demo mode (no OpenAI key)")
+    
+    # Check auth
+    logger.info(f"🔐 Authentication: {len(auth_manager.api_keys)} API keys loaded")
 
 @app.get("/")
 def read_root():
@@ -81,16 +109,17 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint for Railway and monitoring"""
+    """Health check endpoint for Render and monitoring"""
     try:
-        # Test database connection
+        # Test database connection with proper text() wrapper
         db = SessionLocal()
-        db.execute("SELECT 1")
+        result = db.execute(text("SELECT 1"))
+        result.fetchone()
         db.close()
         db_status = "connected"
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
-        db_status = "disconnected"
+        db_status = f"disconnected: {str(e)[:100]}"
     
     return {
         "status": "healthy", 
@@ -104,24 +133,45 @@ def health_check():
 @app.get("/auth/health")
 def authenticated_health_check(api_key: str = Depends(verify_api_key)):
     """Health check that requires authentication"""
+    try:
+        # Test database connection
+        db = SessionLocal()
+        result = db.execute(text("SELECT 1"))
+        result.fetchone()
+        db.close()
+        db_status = "connected"
+    except Exception as e:
+        db_status = f"error: {str(e)[:50]}"
+    
     return {
         "status": "healthy", 
         "message": "API is running with authentication", 
         "authenticated": True,
         "api_key": f"{api_key[:8]}...{api_key[-4:]}",
-        "database": "connected",
+        "database": db_status,
         "timestamp": datetime.utcnow().isoformat()
     }
 
 @app.get("/debug/info")
 def debug_info():
-    """Debug endpoint to check configuration (development only)"""
+    """Debug endpoint to check configuration"""
+    try:
+        # Test database connection
+        db = SessionLocal()
+        result = db.execute(text("SELECT 1"))
+        result.fetchone()
+        db.close()
+        db_test = "✅ Connected"
+    except Exception as e:
+        db_test = f"❌ Error: {str(e)[:100]}"
+    
     return {
         "environment": {
             "database_configured": bool(os.getenv("DATABASE_URL")),
+            "database_test": db_test,
             "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
             "port": os.getenv("PORT", "8000"),
-            "railway_environment": bool(os.getenv("RAILWAY_ENVIRONMENT")),
+            "render_environment": bool(os.getenv("RENDER")),
         },
         "api_keys": {
             "total_keys": len(auth_manager.api_keys),
@@ -149,7 +199,7 @@ def test_endpoint():
         "timestamp": datetime.utcnow().isoformat(),
         "status": "success",
         "database": "Neon PostgreSQL",
-        "deployment": "Railway"
+        "deployment": "Render"
     }
 
 @app.post("/ask", response_model=AnswerResponse)
@@ -179,22 +229,32 @@ async def ask_question(
             db.refresh(db_question)
             
             # Create a demo answer
-            demo_answer = f"""🎭 **Demo Response**
+            demo_answer = f"""🎭 **Demo Response from Render Deployment**
 
 Your question: "{request.question}"
 
-This is a demonstration of the Q&A system. In full mode with OpenAI API key configured, this system would:
+This is a demonstration of the Q&A system running successfully on Render! 
+
+**System Status:**
+✅ **FastAPI Backend**: Running on Render.com
+✅ **Database**: Connected to Neon PostgreSQL  
+✅ **Authentication**: API key verified
+✅ **Storage**: Question saved to database
+
+**In full mode with OpenAI API key configured, this system would:**
 
 🔍 **Step 1**: Generate embeddings for your question using OpenAI's text-embedding-ada-002
 🔎 **Step 2**: Search for similar questions in the vector database  
 🧠 **Step 3**: Either return a cached answer or generate a new one using GPT-4
 💾 **Step 4**: Store the question, answer, and embeddings for future reference
 
-**Current Status**: Demo mode - configure OPENAI_API_KEY environment variable for AI-powered responses.
+**To enable AI responses:** Add your OPENAI_API_KEY to the Render environment variables.
 
-**Database**: ✅ Connected to Neon PostgreSQL
-**Authentication**: ✅ API key verified
-**Storage**: ✅ Question saved to database"""
+**Deployment Info:**
+- Platform: Render.com (Free Tier)
+- Database: Neon PostgreSQL
+- Question ID: {db_question.id}
+- Timestamp: {datetime.utcnow().isoformat()}"""
             
             # Store the answer
             db_answer = Answer(
@@ -293,13 +353,17 @@ def get_questions(
     api_key: str = Depends(verify_api_key)
 ):
     """📋 Get all questions with pagination - requires authentication"""
-    questions = db.query(Question).offset(skip).limit(limit).all()
-    return {
-        "questions": questions,
-        "total": db.query(Question).count(),
-        "skip": skip,
-        "limit": limit
-    }
+    try:
+        questions = db.query(Question).offset(skip).limit(limit).all()
+        total = db.query(Question).count()
+        return {
+            "questions": questions,
+            "total": total,
+            "skip": skip,
+            "limit": limit
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/stats")
 def get_stats(
@@ -307,23 +371,26 @@ def get_stats(
     api_key: str = Depends(verify_api_key)
 ):
     """📊 Get system statistics - requires authentication"""
-    total_embeddings = db.query(Embedding).count()
-    total_questions = db.query(Question).count()
-    total_answers = db.query(Answer).count()
-    
-    return {
-        "database_stats": {
-            "total_embeddings": total_embeddings,
-            "total_questions": total_questions,
-            "total_answers": total_answers,
-            "embedding_coverage": total_embeddings / max(total_questions, 1)
-        },
-        "system_info": {
-            "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
-            "database_connected": True,
-            "version": "3.0.0"
+    try:
+        total_embeddings = db.query(Embedding).count()
+        total_questions = db.query(Question).count()
+        total_answers = db.query(Answer).count()
+        
+        return {
+            "database_stats": {
+                "total_embeddings": total_embeddings,
+                "total_questions": total_questions,
+                "total_answers": total_answers,
+                "embedding_coverage": total_embeddings / max(total_questions, 1)
+            },
+            "system_info": {
+                "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
+                "database_connected": True,
+                "version": "3.0.0"
+            }
         }
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
