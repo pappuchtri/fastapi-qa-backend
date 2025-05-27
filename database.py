@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
@@ -27,18 +27,22 @@ try:
     # Create SQLAlchemy engine
     engine = create_engine(DATABASE_URL)
     
-    # Test the connection
+    # Test the connection with proper text() wrapper
     with engine.connect() as connection:
-        connection.execute("SELECT 1")
+        result = connection.execute(text("SELECT 1"))
+        result.fetchone()
     print("✅ Database connection successful!")
     
 except Exception as e:
     print(f"❌ Database connection failed: {str(e)}")
     print("Please check your DATABASE_URL and ensure the database is accessible")
-    raise
+    # Don't raise here - let the app start and handle errors gracefully
+    print("⚠️ Continuing startup - database errors will be handled at runtime")
 
 # Create SessionLocal class
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Create Base class
 Base = declarative_base()
+
+print("✅ Database setup completed")
