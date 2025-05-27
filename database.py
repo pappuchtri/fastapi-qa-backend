@@ -6,19 +6,39 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Get database URL from environment variables
+# Get database URL from environment variables with better error handling
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
+    print("❌ ERROR: DATABASE_URL environment variable is not set!")
+    print("Please set your Neon database URL in Render environment variables.")
+    print("Example: postgresql://username:password@host:5432/database")
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Create SQLAlchemy engine
-engine = create_engine(DATABASE_URL)
+# Validate DATABASE_URL format
+if not DATABASE_URL.startswith(('postgresql://', 'postgres://')):
+    print(f"❌ ERROR: Invalid DATABASE_URL format: {DATABASE_URL[:50]}...")
+    print("DATABASE_URL should start with 'postgresql://' or 'postgres://'")
+    raise ValueError("Invalid DATABASE_URL format")
+
+print(f"✅ Database URL configured: {DATABASE_URL[:30]}...")
+
+try:
+    # Create SQLAlchemy engine
+    engine = create_engine(DATABASE_URL)
+    
+    # Test the connection
+    with engine.connect() as connection:
+        connection.execute("SELECT 1")
+    print("✅ Database connection successful!")
+    
+except Exception as e:
+    print(f"❌ Database connection failed: {str(e)}")
+    print("Please check your DATABASE_URL and ensure the database is accessible")
+    raise
 
 # Create SessionLocal class
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Create Base class
 Base = declarative_base()
-
-print(f"Database configured: {DATABASE_URL[:20]}...")
