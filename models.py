@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, DECIMAL, ARRAY
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, DECIMAL, JSON
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -33,14 +33,15 @@ class Embedding(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
-    vector = Column(ARRAY(DECIMAL), nullable=False)
+    # Using JSON instead of ARRAY for better compatibility
+    vector = Column(JSON, nullable=False)
     model_name = Column(String(100), default="text-embedding-ada-002")
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
     question = relationship("Question", back_populates="embeddings")
 
-print("Database models defined:")
+print("✅ Database models defined:")
 print("- Question: stores user questions")
 print("- Answer: stores AI-generated answers")
-print("- Embedding: stores vector embeddings for similarity search")
+print("- Embedding: stores vector embeddings for similarity search (JSON format)")
