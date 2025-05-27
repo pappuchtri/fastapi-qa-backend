@@ -1,0 +1,21 @@
+# Render.com deployment configuration
+services:
+  - type: web
+    name: qa-api-backend
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11
+      - key: DATABASE_URL
+        sync: false  # You'll set this manually
+      - key: OPENAI_API_KEY
+        sync: false  # Optional
+      - key: MASTER_API_KEY
+        value: master-dev-key
+      - key: ADDITIONAL_API_KEYS
+        value: dev-api-key-123,test-api-key-456,demo-key-789,qa-development-key
