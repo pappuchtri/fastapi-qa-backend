@@ -1,6 +1,5 @@
 import openai
 import numpy as np
-import faiss
 from typing import List, Tuple, Optional
 from sqlalchemy.orm import Session
 from sklearn.metrics.pairwise import cosine_similarity
@@ -9,7 +8,7 @@ from models import Question, Answer, Embedding
 
 class RAGService:
     def __init__(self):
-        """Initialize the RAG service with OpenAI client and FAISS index"""
+        """Initialize the RAG service with OpenAI client"""
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if self.openai_api_key:
             self.openai_client = openai.OpenAI(api_key=self.openai_api_key)
@@ -24,18 +23,22 @@ class RAGService:
         """Generate embedding for given text using OpenAI text-embedding-ada-002"""
         if not self.openai_client:
             # Return a dummy embedding for demo purposes
+            print(f"🎭 Generating demo embedding for: {text[:50]}...")
             return np.random.rand(self.embedding_dimension)
         
         try:
+            print(f"🤖 Generating OpenAI embedding for: {text[:50]}...")
             response = self.openai_client.embeddings.create(
                 model="text-embedding-ada-002",
                 input=text
             )
             embedding = np.array(response.data[0].embedding)
+            print(f"✅ Embedding generated successfully (dimension: {len(embedding)})")
             return embedding
         except Exception as e:
-            print(f"Error generating embedding: {str(e)}")
+            print(f"❌ Error generating embedding: {str(e)}")
             # Return a dummy embedding as fallback
+            print("🎭 Falling back to demo embedding")
             return np.random.rand(self.embedding_dimension)
     
     async def find_similar_question(
@@ -48,22 +51,38 @@ class RAGService:
         Returns the question and similarity score
         """
         try:
+            print("🔍 Searching for similar questions in database...")
+            
             # Get all embeddings from database
             embeddings = db.query(Embedding).all()
             
             if not embeddings:
+                print("📭 No embeddings found in database")
                 return None, 0.0
+            
+            print(f"📊 Found {len(embeddings)} embeddings to compare")
             
             # Convert stored embeddings to numpy array
             stored_embeddings = []
             questions = []
             
             for emb in embeddings:
-                stored_embeddings.append(np.array(emb.vector))
-                question = db.query(Question).filter(Question.id == emb.question_id).first()
-                questions.append(question)
+                try:
+                    # Convert stored vector to numpy array
+                    if isinstance(emb.vector, list):
+                        vector = np.array([float(x) for x in emb.vector])
+                    else:
+                        vector = np.array(emb.vector)
+                    
+                    stored_embeddings.append(vector)
+                    question = db.query(Question).filter(Question.id == emb.question_id).first()
+                    questions.append(question)
+                except Exception as e:
+                    print(f"⚠️ Error processing embedding {emb.id}: {str(e)}")
+                    continue
             
             if not stored_embeddings:
+                print("📭 No valid embeddings found")
                 return None, 0.0
             
             # Calculate cosine similarities
@@ -77,18 +96,35 @@ class RAGService:
             max_similarity = similarities[max_similarity_idx]
             most_similar_question = questions[max_similarity_idx]
             
+            print(f"🎯 Best match: {max_similarity:.3f} similarity")
+            if most_similar_question:
+                print(f"📝 Similar question: {most_similar_question.text[:50]}...")
+            
             return most_similar_question, float(max_similarity)
             
         except Exception as e:
-            print(f"Error in similarity search: {str(e)}")
+            print(f"❌ Error in similarity search: {str(e)}")
             return None, 0.0
     
     async def generate_answer(self, question: str) -> str:
         """Generate answer using OpenAI GPT-4"""
         if not self.openai_client:
-            return f"Demo answer for: '{question}'. Please configure OPENAI_API_KEY for AI-powered responses."
+            return f"""🎭 **Demo Answer**
+
+Question: "{question}"
+
+This is a demonstration response. To get AI-powered answers, please configure your OPENAI_API_KEY environment variable.
+
+**What this system would do with OpenAI configured:**
+- Use GPT-4 to generate intelligent, contextual answers
+- Provide accurate information based on the question
+- Maintain conversation context and follow-up capabilities
+
+**Current Status:** Demo mode - showing system functionality without AI costs."""
         
         try:
+            print(f"🧠 Generating AI answer for: {question[:50]}...")
+            
             response = self.openai_client.chat.completions.create(
                 model="gpt-4",
                 messages=[
@@ -105,24 +141,36 @@ class RAGService:
                 temperature=0.7
             )
             
-            return response.choices[0].message.content.strip()
+            answer = response.choices[0].message.content.strip()
+            print(f"✅ AI answer generated successfully ({len(answer)} characters)")
+            return answer
             
         except Exception as e:
-            print(f"Error generating answer: {str(e)}")
-            return f"I apologize, but I encountered an error while generating an answer to your question: '{question}'. Please try again later."
+            print(f"❌ Error generating answer: {str(e)}")
+            return f"""I apologize, but I encountered an error while generating an answer to your question: "{question}". 
+
+**Error details:** {str(e)}
+
+Please try again later or contact support if the issue persists."""
     
     def calculate_cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
         """Calculate cosine similarity between two vectors"""
-        dot_product = np.dot(vec1, vec2)
-        norm_vec1 = np.linalg.norm(vec1)
-        norm_vec2 = np.linalg.norm(vec2)
-        
-        if norm_vec1 == 0 or norm_vec2 == 0:
+        try:
+            dot_product = np.dot(vec1, vec2)
+            norm_vec1 = np.linalg.norm(vec1)
+            norm_vec2 = np.linalg.norm(vec2)
+            
+            if norm_vec1 == 0 or norm_vec2 == 0:
+                return 0.0
+            
+            similarity = dot_product / (norm_vec1 * norm_vec2)
+            return float(similarity)
+        except Exception as e:
+            print(f"❌ Error calculating similarity: {str(e)}")
             return 0.0
-        
-        return dot_product / (norm_vec1 * norm_vec2)
 
-print("RAG Service initialized:")
+print("✅ RAG Service initialized:")
 print(f"- OpenAI client configured: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No (demo mode)'}")
-print("- Cosine similarity and FAISS for vector search")
+print("- Using scikit-learn for cosine similarity (no FAISS required)")
 print("- Similarity threshold: 0.8")
+print("- Embedding dimension: 1536 (text-embedding-ada-002)")
