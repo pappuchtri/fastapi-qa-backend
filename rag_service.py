@@ -90,9 +90,14 @@ class RAGService:
             
             for emb in embeddings:
                 try:
-                    # Convert stored vector to numpy array
+                    # Handle both list and string formats
                     if isinstance(emb.vector, list):
                         vector = np.array([float(x) for x in emb.vector])
+                    elif isinstance(emb.vector, str):
+                        # Handle string format (legacy data)
+                        import json
+                        vector_list = json.loads(emb.vector)
+                        vector = np.array([float(x) for x in vector_list])
                     else:
                         vector = np.array(emb.vector)
                     
