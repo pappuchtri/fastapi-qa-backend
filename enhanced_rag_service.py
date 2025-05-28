@@ -542,7 +542,9 @@ Provide only the JSON response, no additional text."""
                     "confidence": best_match.get("confidence", 0.9),
                     "primary_source": "historical_qa",
                     "source_documents": [],
-                    "source_type": "historical"
+                    "source_type": "historical",
+                    "question_id": best_match["question_id"],  # Add this line
+                    "similarity": best_match["similarity"]     # Add this line
                 }
         
         # STEP 3: Fallback to GPT
