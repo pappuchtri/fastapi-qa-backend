@@ -3,14 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import os
 import uuid
 from datetime import datetime
-import numpy as np
 import uvicorn
 from dotenv import load_dotenv
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -19,8 +17,7 @@ load_dotenv()
 
 # Import our modules
 from database import SessionLocal, engine, get_db, Base
-from models import Question, Answer, Embedding
-from document_models import Document, DocumentChunk  # Import document models
+from models import Question, Answer, Embedding, Document
 from schemas import (
     QuestionAnswerRequest, 
     QuestionAnswerResponse, 
@@ -31,15 +28,16 @@ from schemas import (
 )
 from rag_service import RAGService
 import crud
+from simple_pdf_processor import SimplePDFProcessor
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize services
+# Initialize RAG service
 rag_service = RAGService()
 
-# Create database tables - THIS IS IMPORTANT!
+# Create database tables
 Base.metadata.create_all(bind=engine)
 
 @asynccontextmanager
@@ -47,13 +45,6 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     logger.info("🚀 Starting PDF RAG Q&A API...")
-    
-    # Create tables on startup
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("✅ Database tables created/verified")
-    except Exception as e:
-        logger.error(f"❌ Error creating tables: {str(e)}")
     
     # Check DATABASE_URL
     database_url = os.getenv("DATABASE_URL")
@@ -138,8 +129,7 @@ async def root():
             "ask": "/ask",
             "questions": "/questions",
             "documents": "/documents",
-            "upload": "/documents/upload",
-            "search": "/documents/search"
+            "upload": "/documents/upload"
         }
     }
 
@@ -175,7 +165,7 @@ async def ask_question(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Ask a question and get an AI-generated answer using RAG with document context"""
+    """Ask a question and get an AI-generated answer using RAG"""
     try:
         question_text = request.question.strip()
         
@@ -190,40 +180,10 @@ async def ask_question(
         # Generate embedding for the question
         query_embedding = await rag_service.generate_embedding(question_text)
         
-        # Search for similar questions first
+        # Search for similar questions
         similar_question, similarity_score = await rag_service.find_similar_question(
             db, query_embedding
         )
-        
-        # Search for relevant document chunks
-        relevant_chunks = []
-        source_documents = []
-        
-        try:
-            # Search for similar chunks using simple text search for now
-            result = db.execute(text("""
-                SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
-                       d.original_filename
-                FROM document_chunks dc
-                JOIN documents d ON dc.document_id = d.id
-                WHERE dc.content ILIKE :query
-                LIMIT 3
-            """), {"query": f"%{question_text}%"})
-            
-            for row in result:
-                chunk_id, doc_id, content, page_number, filename = row
-                relevant_chunks.append({
-                    "chunk_id": chunk_id,
-                    "document_id": doc_id,
-                    "content": content,
-                    "page_number": page_number,
-                    "filename": filename
-                })
-                source_documents.append(filename)
-                
-            print(f"📄 Found {len(relevant_chunks)} relevant document chunks")
-        except Exception as e:
-            print(f"⚠️ Error searching document chunks: {str(e)}")
         
         # Determine if we should use cached answer or generate new one
         is_cached = False
@@ -241,30 +201,9 @@ async def ask_question(
                 print("📋 Using cached answer")
         
         if not is_cached:
-            # Generate new answer with document context
-            print("🧠 Generating new answer with document context...")
-            
-            # Prepare context from relevant chunks
-            context = ""
-            if relevant_chunks:
-                context_parts = []
-                for chunk in relevant_chunks:
-                    context_parts.append(f"From {chunk['filename']} (Page {chunk['page_number'] or 'N/A'}):\n{chunk['content']}")
-                
-                context = "\n\n".join(context_parts)
-            
-            # Generate answer with context
-            if context:
-                enhanced_question = f"""Context from uploaded documents:
-{context}
-
-Question: {question_text}
-
-Please answer the question based on the provided context. If the context doesn't contain relevant information, please say so and provide a general answer."""
-            else:
-                enhanced_question = question_text
-            
-            answer_text = await rag_service.generate_answer(enhanced_question)
+            # Generate new answer
+            print("🧠 Generating new answer...")
+            answer_text = await rag_service.generate_answer(question_text)
             
             # Store new question and answer
             new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
@@ -285,13 +224,150 @@ Please answer the question based on the provided context. If the context doesn't
             answer_id = new_answer.id
             print("💾 Stored new question and answer")
         
+        # Search for relevant document chunks using better text search
+        relevant_chunks = []
+        source_documents = []
+
+        try:
+            # First try vector similarity search if embeddings are available
+            if hasattr(rag_service, 'search_document_chunks'):
+                relevant_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
+            
+            # Fallback to text-based search if no vector search results
+            if not relevant_chunks:
+                # Use PostgreSQL full-text search for better results
+                result = db.execute(text("""
+                    SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
+                           d.original_filename, d.id as doc_id
+                    FROM document_chunks dc
+                    JOIN documents d ON dc.document_id = d.id
+                    WHERE d.processed = true 
+                    AND (
+                        dc.content ILIKE :query1 OR
+                        dc.content ILIKE :query2 OR
+                        to_tsvector('english', dc.content) @@ plainto_tsquery('english', :query3)
+                    )
+                    ORDER BY 
+                        CASE 
+                            WHEN dc.content ILIKE :query1 THEN 1
+                            WHEN dc.content ILIKE :query2 THEN 2
+                            ELSE 3
+                        END,
+                        ts_rank(to_tsvector('english', dc.content), plainto_tsquery('english', :query3)) DESC
+                    LIMIT 5
+                """), {
+                    "query1": f"%{question_text}%",
+                    "query2": f"%{' '.join(question_text.split()[:3])}%",  # First 3 words
+                    "query3": question_text
+                })
+                
+                for row in result:
+                    chunk_id, doc_id, content, page_number, filename, document_id = row
+                    relevant_chunks.append({
+                        "chunk_id": chunk_id,
+                        "document_id": doc_id,
+                        "content": content[:500],  # Limit content length
+                        "page_number": page_number,
+                        "filename": filename
+                    })
+                    if filename not in source_documents:
+                        source_documents.append(filename)
+            
+            print(f"📄 Found {len(relevant_chunks)} relevant document chunks from {len(source_documents)} documents")
+            
+            # If still no results, try broader search
+            if not relevant_chunks:
+                # Search for any documents that might be relevant
+                keywords = question_text.lower().split()
+                keyword_queries = []
+                for keyword in keywords[:5]:  # Use first 5 keywords
+                    if len(keyword) > 3:  # Skip short words
+                        keyword_queries.append(f"dc.content ILIKE '%{keyword}%'")
+                
+                if keyword_queries:
+                    broad_query = f"""
+                        SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
+                               d.original_filename
+                        FROM document_chunks dc
+                        JOIN documents d ON dc.document_id = d.id
+                        WHERE d.processed = true AND ({' OR '.join(keyword_queries)})
+                        LIMIT 3
+                    """
+                    
+                    result = db.execute(text(broad_query))
+                    for row in result:
+                        chunk_id, doc_id, content, page_number, filename = row
+                        relevant_chunks.append({
+                            "chunk_id": chunk_id,
+                            "document_id": doc_id,
+                            "content": content[:500],
+                            "page_number": page_number,
+                            "filename": filename
+                        })
+                        if filename not in source_documents:
+                            source_documents.append(filename)
+                    
+                    print(f"📄 Broad search found {len(relevant_chunks)} additional chunks")
+
+        except Exception as e:
+            print(f"⚠️ Error searching document chunks: {str(e)}")
+
+        # Enhanced context preparation
+        context = ""
+        if relevant_chunks:
+            print(f"🔍 Preparing context from {len(relevant_chunks)} chunks")
+            context_parts = []
+            for i, chunk in enumerate(relevant_chunks):
+                chunk_preview = chunk['content'][:300] + "..." if len(chunk['content']) > 300 else chunk['content']
+                context_parts.append(
+                    f"[Document {i+1}: {chunk['filename']} - Page {chunk['page_number'] or 'N/A'}]\n{chunk_preview}"
+                )
+            
+            context = "\n\n".join(context_parts)
+            print(f"📝 Context prepared: {len(context)} characters")
+
+        # Generate answer with enhanced prompting
+        if not is_cached:
+            print("🧠 Generating new answer with document context...")
+            
+            if context:
+                enhanced_question = f"""You are an AI assistant helping to answer questions based on uploaded documents. 
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{context}
+
+USER QUESTION: {question_text}
+
+INSTRUCTIONS:
+1. First, carefully analyze the provided context from the uploaded documents
+2. If the context contains relevant information to answer the question, use it as your primary source
+3. Clearly indicate which document(s) you're referencing in your answer
+4. If the context doesn't contain sufficient information, say so and provide a general answer
+5. Be specific about page numbers when referencing document content
+6. Keep your answer concise but comprehensive
+
+Please provide a helpful answer based on the above context and question."""
+            else:
+                # Check if there are any documents at all
+                doc_count = db.query(Document).filter(Document.processed == True).count()
+                if doc_count > 0:
+                    enhanced_question = f"""You are an AI assistant. The user has uploaded {doc_count} document(s) to the system, but none of them appear to contain information directly relevant to this question: "{question_text}"
+
+Please provide a general answer to this question, and suggest that the user might want to upload more specific documents if they're looking for document-based information."""
+                else:
+                    enhanced_question = f"""You are an AI assistant. The user is asking: "{question_text}"
+
+No documents have been uploaded to the system yet. Please provide a general answer to this question and suggest that they can upload relevant documents for more specific, document-based answers."""
+            
+            answer_text = await rag_service.generate_answer(enhanced_question)
+        
         return QuestionAnswerResponse(
             answer=answer_text,
             question_id=question_id,
             answer_id=answer_id,
             similarity_score=similarity_score,
             is_cached=is_cached,
-            source_documents=list(set(source_documents))  # Remove duplicates
+            source_documents=source_documents  # Will be populated when document processing is added
         )
         
     except HTTPException:
@@ -316,29 +392,19 @@ async def get_questions(
 
 @app.get("/documents")
 async def list_documents(
-    page: int = 1,
-    per_page: int = 10,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
     """List all uploaded documents"""
     try:
-        # Calculate offset
-        offset = (page - 1) * per_page
-        
-        # Get total count
-        total_result = db.execute(text("SELECT COUNT(*) FROM documents"))
-        total = total_result.fetchone()[0]
-        
-        # Query documents with pagination
+        # Query documents table directly
         result = db.execute(text("""
             SELECT id, filename, original_filename, file_size, 
                    content_type, upload_date, processed, processing_status,
                    total_pages, total_chunks
             FROM documents 
             ORDER BY upload_date DESC
-            LIMIT :limit OFFSET :offset
-        """), {"limit": per_page, "offset": offset})
+        """))
         
         documents = []
         for row in result:
@@ -357,9 +423,8 @@ async def list_documents(
         
         return {
             "documents": documents,
-            "total": total,
-            "page": page,
-            "per_page": per_page
+            "total": len(documents),
+            "message": "Documents retrieved successfully"
         }
         
     except Exception as e:
@@ -371,6 +436,7 @@ async def list_documents(
 
 @app.post("/documents/upload")
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
@@ -412,17 +478,22 @@ async def upload_document(
         db.commit()
         db.refresh(document)
         
-        # For now, just mark as processed (you can add actual PDF processing later)
-        document.processing_status = "processed"
-        document.processed = True
-        db.commit()
+        # Process PDF in background
+        pdf_processor = SimplePDFProcessor(rag_service)
+        background_tasks.add_task(
+            pdf_processor.process_pdf_content,
+            db,
+            document.id,
+            file_content
+        )
         
         return {
-            "message": "Document uploaded successfully",
+            "message": "Document uploaded successfully and processing started",
             "document_id": document.id,
             "filename": file.filename,
             "file_size": len(file_content),
-            "processing_status": "processed"
+            "processing_status": "uploaded",
+            "note": "PDF processing is running in the background. Check back in a few moments."
         }
         
     except HTTPException:
@@ -434,50 +505,6 @@ async def upload_document(
             detail=f"Error uploading document: {str(e)}"
         )
 
-@app.get("/documents/{document_id}")
-async def get_document(
-    document_id: int,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """Get document details"""
-    try:
-        # Get document using ORM
-        document = db.query(Document).filter(Document.id == document_id).first()
-        
-        if not document:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document not found"
-            )
-        
-        # Get chunk count
-        chunk_count = db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).count()
-        
-        return {
-            "id": document.id,
-            "filename": document.filename,
-            "original_filename": document.original_filename,
-            "file_size": document.file_size,
-            "content_type": document.content_type,
-            "upload_date": document.upload_date,
-            "processed": document.processed,
-            "processing_status": document.processing_status,
-            "error_message": document.error_message,
-            "total_pages": document.total_pages,
-            "total_chunks": document.total_chunks,
-            "actual_chunk_count": chunk_count
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error getting document: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error getting document: {str(e)}"
-        )
-
 @app.delete("/documents/{document_id}")
 async def delete_document(
     document_id: int,
@@ -487,15 +514,15 @@ async def delete_document(
     """Delete a document and all its chunks"""
     try:
         # Check if document exists
-        document = db.query(Document).filter(Document.id == document_id).first()
-        if not document:
+        result = db.execute(text("SELECT id FROM documents WHERE id = :id"), {"id": document_id})
+        if not result.fetchone():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Document not found"
             )
         
         # Delete document (chunks will be deleted automatically due to CASCADE)
-        db.delete(document)
+        db.execute(text("DELETE FROM documents WHERE id = :id"), {"id": document_id})
         db.commit()
         
         return {"message": "Document deleted successfully"}
@@ -517,30 +544,16 @@ async def get_stats(
     """Get API statistics"""
     try:
         # Get counts from database
-        question_count = db.query(Question).count()
-        answer_count = db.query(Answer).count()
-        document_count = db.query(Document).count()
-        chunk_count = db.query(DocumentChunk).count()
-        embedding_count = db.query(Embedding).count()
-        
-        # Get processing status counts
-        processing_counts = {}
-        status_result = db.execute(text("""
-            SELECT processing_status, COUNT(*) 
-            FROM documents 
-            GROUP BY processing_status
-        """))
-        
-        for row in status_result:
-            processing_counts[row[0]] = row[1]
+        question_count = db.execute(text("SELECT COUNT(*) FROM questions")).fetchone()[0]
+        answer_count = db.execute(text("SELECT COUNT(*) FROM answers")).fetchone()[0]
+        document_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
+        chunk_count = db.execute(text("SELECT COUNT(*) FROM document_chunks")).fetchone()[0]
         
         return {
             "questions": question_count,
             "answers": answer_count,
             "documents": document_count,
             "chunks": chunk_count,
-            "embeddings": embedding_count,
-            "document_status": processing_counts,
             "openai_configured": rag_service.openai_configured,
             "similarity_threshold": rag_service.similarity_threshold
         }
