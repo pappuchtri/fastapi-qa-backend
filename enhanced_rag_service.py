@@ -424,37 +424,183 @@ Provide only the JSON response, no additional text."""
         question_analysis: Dict[str, Any],
         document_context: List[Dict[str, Any]],
         historical_qa: List[Dict[str, Any]]
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
-        Generate a comprehensive answer using all available context
+        Generate a comprehensive answer using all available context with intelligent fallback
+        Returns dict with answer, confidence, and source information
         """
         try:
             if not self.openai_configured:
-                return self._generate_demo_answer(question, question_analysis, document_context, historical_qa)
+                return self._generate_demo_answer_with_fallback(question, question_analysis, document_context, historical_qa)
+        
+            # Assess the quality and relevance of available context
+            context_assessment = self._assess_context_quality(question, question_analysis, document_context, historical_qa)
+        
+            print(f"📊 Context assessment: {context_assessment['overall_confidence']:.2f} confidence")
+            print(f"   - Document relevance: {context_assessment['document_relevance']:.2f}")
+            print(f"   - Historical relevance: {context_assessment['historical_relevance']:.2f}")
+            print(f"   - Recommended approach: {context_assessment['recommended_approach']}")
+        
+            # Choose the appropriate response strategy based on context quality
+            if context_assessment['recommended_approach'] == 'document_based':
+                return await self._generate_document_based_answer(question, question_analysis, document_context, historical_qa)
+            elif context_assessment['recommended_approach'] == 'historical_based':
+                return await self._generate_historical_based_answer(question, question_analysis, document_context, historical_qa)
+            elif context_assessment['recommended_approach'] == 'hybrid':
+                return await self._generate_hybrid_answer(question, question_analysis, document_context, historical_qa)
+            else:  # fallback_to_gpt
+                return await self._generate_gpt_fallback_answer(question, question_analysis, document_context, historical_qa)
             
-            # Prepare context sections
-            doc_context_text = self._format_document_context(document_context)
-            qa_context_text = self._format_qa_context(historical_qa)
-            
-            # Build comprehensive prompt
-            system_prompt = """You are an intelligent AI assistant with access to uploaded documents and historical Q&A data. Your goal is to provide accurate, comprehensive, and well-sourced answers.
+        except Exception as e:
+            print(f"❌ Error generating contextual answer: {str(e)}")
+            return await self._generate_gpt_fallback_answer(question, question_analysis, document_context, historical_qa)
 
-INSTRUCTIONS:
-1. Analyze the user's question carefully
-2. Use document context as your primary source when available
-3. Reference historical Q&A for additional insights
-4. Clearly cite your sources (document names, page numbers)
-5. If information is insufficient, acknowledge limitations
-6. Provide structured, easy-to-read responses
-7. Be concise but thorough"""
+    def _assess_context_quality(
+        self, 
+        question: str, 
+        question_analysis: Dict[str, Any],
+        document_context: List[Dict[str, Any]], 
+        historical_qa: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Assess the quality and relevance of available context to determine response strategy
+        """
+        # Assess document context quality
+        doc_relevance = 0.0
+        if document_context:
+            # Average similarity score weighted by content length
+            total_weight = 0
+            weighted_similarity = 0
+            for doc in document_context:
+                content_length = len(doc.get('content', ''))
+                weight = min(content_length / 500, 1.0)  # Normalize to max weight of 1.0
+                weighted_similarity += doc.get('similarity', 0) * weight
+                total_weight += weight
+        
+            if total_weight > 0:
+                doc_relevance = weighted_similarity / total_weight
+    
+        # Assess historical Q&A quality
+        historical_relevance = 0.0
+        if historical_qa:
+            # Use the best match similarity
+            historical_relevance = max([qa.get('similarity', 0) for qa in historical_qa])
+    
+        # Calculate overall confidence
+        overall_confidence = max(doc_relevance, historical_relevance)
+    
+        # Determine recommended approach
+        if doc_relevance >= 0.75 and len(document_context) >= 2:
+            recommended_approach = 'document_based'
+        elif historical_relevance >= 0.85:
+            recommended_approach = 'historical_based'
+        elif (doc_relevance >= 0.6 or historical_relevance >= 0.7) and (doc_relevance + historical_relevance) >= 1.0:
+            recommended_approach = 'hybrid'
+        else:
+            recommended_approach = 'fallback_to_gpt'
+    
+        return {
+            'document_relevance': doc_relevance,
+            'historical_relevance': historical_relevance,
+            'overall_confidence': overall_confidence,
+            'recommended_approach': recommended_approach,
+            'has_sufficient_context': overall_confidence >= 0.6
+        }
 
-            user_prompt = f"""QUESTION: {question}
+    async def _generate_document_based_answer(
+        self, 
+        question: str,
+        question_analysis: Dict[str, Any],
+        document_context: List[Dict[str, Any]],
+        historical_qa: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Generate answer primarily based on document context"""
+        doc_context_text = self._format_document_context(document_context)
+    
+        system_prompt = """You are an AI assistant specializing in document analysis. Your primary task is to answer questions based on the provided document context. Be precise, cite your sources, and stay focused on the document content."""
 
-QUESTION ANALYSIS:
-- Intent: {question_analysis.get('intent', 'general_inquiry')}
-- Type: {question_analysis.get('question_type', 'factual')}
-- Complexity: {question_analysis.get('complexity', 'medium')}
-- Key concepts: {', '.join(question_analysis.get('keywords', [])[:5])}
+        user_prompt = f"""QUESTION: {question}
+
+DOCUMENT CONTEXT:
+{doc_context_text}
+
+Please provide a comprehensive answer based primarily on the document context. Include specific references to the source documents and page numbers. If the documents don't fully address the question, clearly state what information is missing."""
+
+        import openai
+        response = openai.ChatCompletion.create(
+            model=self.chat_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=600,
+            temperature=0.3,  # Lower temperature for more focused responses
+            timeout=30
+        )
+    
+        answer = response['choices'][0]['message']['content'].strip()
+    
+        return {
+            'answer': answer,
+            'confidence': 0.9,
+            'primary_source': 'documents',
+            'source_documents': [doc['filename'] for doc in document_context]
+        }
+
+    async def _generate_historical_based_answer(
+        self, 
+        question: str,
+        question_analysis: Dict[str, Any],
+        document_context: List[Dict[str, Any]],
+        historical_qa: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Generate answer primarily based on historical Q&A"""
+        qa_context_text = self._format_qa_context(historical_qa)
+    
+        system_prompt = """You are an AI assistant that builds upon previous Q&A interactions. Use the historical context to provide consistent and comprehensive answers while adapting to the current question."""
+
+        user_prompt = f"""QUESTION: {question}
+
+HISTORICAL Q&A CONTEXT:
+{qa_context_text}
+
+Based on the similar previous questions and answers, provide a comprehensive response to the current question. Maintain consistency with previous answers while addressing any new aspects of the current question."""
+
+        import openai
+        response = openai.ChatCompletion.create(
+            model=self.chat_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=600,
+            temperature=0.4,
+            timeout=30
+        )
+    
+        answer = response['choices'][0]['message']['content'].strip()
+    
+        return {
+            'answer': answer,
+            'confidence': 0.85,
+            'primary_source': 'historical_qa',
+            'source_documents': []
+        }
+
+    async def _generate_hybrid_answer(
+        self, 
+        question: str,
+        question_analysis: Dict[str, Any],
+        document_context: List[Dict[str, Any]],
+        historical_qa: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Generate answer using both document and historical context"""
+        doc_context_text = self._format_document_context(document_context)
+        qa_context_text = self._format_qa_context(historical_qa)
+    
+        system_prompt = """You are an intelligent AI assistant with access to both document content and historical Q&A data. Synthesize information from both sources to provide comprehensive, well-sourced answers."""
+
+        user_prompt = f"""QUESTION: {question}
 
 DOCUMENT CONTEXT:
 {doc_context_text}
@@ -462,9 +608,67 @@ DOCUMENT CONTEXT:
 HISTORICAL Q&A CONTEXT:
 {qa_context_text}
 
-Please provide a comprehensive answer based on the available context. If the context doesn't fully address the question, supplement with your general knowledge while clearly distinguishing between sourced and general information."""
+Please provide a comprehensive answer that synthesizes information from both the document context and historical Q&A. Clearly distinguish between information from documents versus previous Q&A sessions."""
 
-            import openai
+        import openai
+        response = openai.ChatCompletion.create(
+            model=self.chat_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=700,
+            temperature=0.5,
+            timeout=30
+        )
+    
+        answer = response['choices'][0]['message']['content'].strip()
+    
+        return {
+            'answer': answer,
+            'confidence': 0.8,
+            'primary_source': 'hybrid',
+            'source_documents': [doc['filename'] for doc in document_context]
+        }
+
+    async def _generate_gpt_fallback_answer(
+        self, 
+        question: str,
+        question_analysis: Dict[str, Any],
+        document_context: List[Dict[str, Any]],
+        historical_qa: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Generate answer using GPT-3.5 Turbo when document/historical context is insufficient
+        """
+        print("🤖 Falling back to GPT-3.5 Turbo for general knowledge response")
+    
+        # Prepare context summary for transparency
+        context_summary = []
+        if document_context:
+            context_summary.append(f"Found {len(document_context)} potentially relevant document sections, but with low confidence.")
+        if historical_qa:
+            context_summary.append(f"Found {len(historical_qa)} similar previous questions, but not closely related.")
+    
+        context_note = " ".join(context_summary) if context_summary else "No relevant context found in uploaded documents or previous Q&A."
+    
+        system_prompt = f"""You are a knowledgeable AI assistant. The user has asked a question, but the available document context and historical Q&A data don't provide sufficient information to answer confidently.
+
+Context Status: {context_note}
+
+Provide a helpful, accurate answer based on your general knowledge. Be clear that this response is generated from general AI knowledge rather than specific uploaded documents. If the question would benefit from specific documentation, suggest what type of documents might be helpful."""
+
+        user_prompt = f"""QUESTION: {question}
+
+QUESTION ANALYSIS:
+- Intent: {question_analysis.get('intent', 'general_inquiry')}
+- Type: {question_analysis.get('question_type', 'factual')}
+- Complexity: {question_analysis.get('complexity', 'medium')}
+
+Please provide a comprehensive answer based on general knowledge. Since no specific document context is available, focus on providing accurate, helpful information while noting that more specific information might be available with relevant documentation."""
+
+        import openai
+        try:
             response = openai.ChatCompletion.create(
                 model=self.chat_model,
                 messages=[
@@ -472,17 +676,107 @@ Please provide a comprehensive answer based on the available context. If the con
                     {"role": "user", "content": user_prompt}
                 ],
                 max_tokens=800,
-                temperature=0.7,
+                temperature=0.7,  # Higher temperature for more creative general responses
                 timeout=30
             )
-            
+        
             answer = response['choices'][0]['message']['content'].strip()
-            print(f"✅ Contextual answer generated ({len(answer)} characters)")
-            return answer
-            
         except Exception as e:
-            print(f"❌ Error generating contextual answer: {str(e)}")
-            return self._generate_fallback_answer(question, document_context, historical_qa)
+            return await self._handle_gpt_error_fallback(question, str(e))
+    
+        # Add a note about the source
+        answer_with_note = f"{answer}\n\n---\n*Note: This response is generated from general AI knowledge as no specific relevant information was found in your uploaded documents or previous Q&A history. For more specific information, consider uploading relevant documents.*"
+    
+        return {
+            'answer': answer_with_note,
+            'confidence': 0.7,
+            'primary_source': 'gpt_fallback',
+            'source_documents': []
+        }
+
+    def _generate_demo_answer_with_fallback(
+        self, 
+        question: str, 
+        question_analysis: Dict[str, Any],
+        document_context: List[Dict[str, Any]], 
+        historical_qa: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Generate a demo answer with fallback logic demonstration"""
+        context_summary = []
+    
+        if document_context:
+            context_summary.append(f"📄 Found {len(document_context)} document sections")
+            avg_similarity = sum(doc.get('similarity', 0) for doc in document_context) / len(document_context)
+            context_summary.append(f"   Average relevance: {avg_similarity:.2f}")
+    
+        if historical_qa:
+            context_summary.append(f"📚 Found {len(historical_qa)} similar Q&A pairs")
+            best_similarity = max(qa.get('similarity', 0) for qa in historical_qa)
+            context_summary.append(f"   Best match: {best_similarity:.2f}")
+    
+        # Simulate fallback decision
+        has_good_context = (
+            (document_context and any(doc.get('similarity', 0) >= 0.75 for doc in document_context)) or
+            (historical_qa and any(qa.get('similarity', 0) >= 0.85 for qa in historical_qa))
+        )
+    
+        if has_good_context:
+            approach = "Document/Historical Context"
+            confidence = 0.9
+        else:
+            approach = "GPT-3.5 Turbo Fallback"
+            confidence = 0.7
+    
+        demo_answer = f"""🎭 **Demo Response** (OpenAI not configured)
+
+**Question:** {question}
+
+**Context Analysis:**
+{chr(10).join(context_summary) if context_summary else "No relevant context found"}
+
+**Selected Approach:** {approach}
+**Confidence:** {confidence}
+
+**What the full system would do:**
+{
+        "Use the high-quality document/historical context to generate a well-sourced answer with specific citations." 
+        if has_good_context 
+        else "Fall back to GPT-3.5 Turbo to provide a general knowledge response, clearly noting the lack of specific context."
+    }
+
+**Enhanced RAG Features:**
+✅ Intelligent context assessment
+✅ Multi-strategy source evaluation  
+✅ Automatic GPT fallback when needed
+✅ Transparent source attribution
+✅ Confidence scoring"""
+
+        return {
+            'answer': demo_answer,
+            'confidence': confidence,
+            'primary_source': 'demo',
+            'source_documents': [doc['filename'] for doc in document_context] if document_context else []
+        }
+
+    async def _handle_gpt_error_fallback(self, question: str, error: str) -> Dict[str, Any]:
+        """Handle errors in GPT generation with a graceful fallback"""
+        fallback_answer = f"""I apologize, but I encountered an error while generating a response to your question: "{question}"
+
+Error details: {error}
+
+This appears to be a temporary issue. Please try asking your question again, or consider:
+1. Rephrasing your question
+2. Uploading relevant documents for more specific context
+3. Checking if the question can be broken down into smaller parts
+
+If the issue persists, please contact support."""
+
+        return {
+            'answer': fallback_answer,
+            'confidence': 0.3,
+            'primary_source': 'error_fallback',
+            'source_documents': []
+        }
     
     def _format_document_context(self, document_context: List[Dict[str, Any]]) -> str:
         """Format document context for the prompt"""
