@@ -125,11 +125,11 @@ async def root():
         "version": "2.0.0",
         "status": "running",
         "features": [
-            "Contextual question analysis",
+            "Strict prioritization of document content",
             "Multi-strategy document search",
-            "Semantic similarity matching",
             "Historical Q&A integration",
-            "Intelligent source attribution"
+            "GPT fallback for unknown questions",
+            "Transparent source attribution"
         ],
         "endpoints": {
             "health": "/health",
@@ -173,7 +173,7 @@ async def ask_question(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Ask a question and get an AI-generated answer using enhanced RAG with intelligent fallback"""
+    """Ask a question with strict prioritization: 1) Documents, 2) Historical Q&A, 3) GPT"""
     try:
         question_text = request.question.strip()
         
@@ -183,7 +183,7 @@ async def ask_question(
                 detail="Question cannot be empty"
             )
         
-        print(f"🔍 Processing question with enhanced RAG: {question_text[:50]}...")
+        print(f"🔍 Processing question with strict prioritization: {question_text[:50]}...")
         
         # Step 1: Analyze the question to understand intent and context
         question_analysis = await rag_service.analyze_question_intent(question_text)
@@ -192,57 +192,21 @@ async def ask_question(
         # Step 2: Generate embedding for semantic search
         query_embedding = await rag_service.generate_embedding(question_text)
         
-        # Step 3: Search for relevant documents using multiple strategies
-        relevant_documents = await rag_service.search_relevant_documents(
-            db, query_embedding, question_analysis, limit=5
+        # Step 3: Process the question with strict prioritization
+        response_data = await rag_service.process_question(
+            db, question_text, query_embedding, question_analysis
         )
         
-        # Step 4: Search for relevant historical Q&A pairs
-        historical_qa = await rag_service.search_historical_qa(
-            db, query_embedding, question_analysis, limit=3
-        )
-        
-        # Step 5: Check if we should use a cached answer (very high similarity threshold)
-        is_cached = False
-        question_id = None
-        answer_id = None
-        
-        if historical_qa and len(historical_qa) > 0:
-            best_match = historical_qa[0]
-            if best_match["similarity"] >= 0.95:  # Very high threshold for exact matches
-                print(f"✅ Using cached answer (similarity: {best_match['similarity']:.3f})")
-                
-                # Get the cached answer details
-                question_id = best_match["question_id"]
-                latest_answer = crud.get_answers_for_question(db, question_id)
-                if latest_answer:
-                    answer_id = latest_answer[0].id
-                    
-                    response_data = {
-                        'answer': best_match["answer_text"],
-                        'confidence': best_match.get("confidence", 0.95),
-                        'primary_source': 'cached',
-                        'source_documents': []
-                    }
-                    is_cached = True
-        
-        # Step 6: Generate new answer using enhanced RAG with intelligent fallback
-        if not is_cached:
-            print("🧠 Generating new answer with intelligent fallback logic...")
-            
-            # Use the enhanced contextual answer generation
-            response_data = await rag_service.generate_contextual_answer(
-                question_text, question_analysis, relevant_documents, historical_qa
-            )
-            
-            # Store new question and answer
+        # Step 4: Store the question and answer if not from historical Q&A
+        if response_data.get("source_type") != "historical":
+            # Store new question
             new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
             question_id = new_question.id
             
             # Store embedding
             crud.create_embedding(db, question_id, query_embedding)
             
-            # Store answer with the confidence from the response
+            # Store answer
             new_answer = crud.create_answer(
                 db, 
                 crud.AnswerCreate(
@@ -253,22 +217,20 @@ async def ask_question(
             )
             answer_id = new_answer.id
             
-            print(f"💾 Stored new question and answer (source: {response_data['primary_source']}, confidence: {response_data['confidence']:.2f})")
-        
-        # Calculate overall similarity score
-        similarity_score = 0.0
-        if historical_qa:
-            similarity_score = historical_qa[0]["similarity"]
-        elif relevant_documents:
-            similarity_score = max([doc["similarity"] for doc in relevant_documents])
+            print(f"💾 Stored new question and answer (source: {response_data.get('primary_source')}, confidence: {response_data['confidence']:.2f})")
+        else:
+            # Using historical Q&A
+            question_id = response_data.get("question_id")
+            answer_id = response_data.get("answer_id")
+            print(f"📚 Using historical Q&A (question_id: {question_id})")
         
         # Prepare final response
         return QuestionAnswerResponse(
             answer=response_data['answer'],
             question_id=question_id,
             answer_id=answer_id,
-            similarity_score=similarity_score,
-            is_cached=is_cached,
+            similarity_score=response_data.get('similarity', 0.0),
+            is_cached=response_data.get("source_type") == "historical",
             source_documents=response_data.get('source_documents', [])
         )
         
@@ -459,7 +421,7 @@ async def get_stats(
             "openai_configured": rag_service.openai_configured,
             "document_similarity_threshold": rag_service.document_similarity_threshold,
             "qa_similarity_threshold": rag_service.qa_similarity_threshold,
-            "version": "2.0.0 - Enhanced RAG"
+            "version": "2.0.0 - Enhanced RAG with Strict Prioritization"
         }
         
     except Exception as e:
