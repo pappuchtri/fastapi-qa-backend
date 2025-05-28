@@ -27,8 +27,8 @@ class RAGService:
         self.embedding_dimension = 1536  # text-embedding-ada-002 dimension
         self.similarity_threshold = 0.8
         
-        # Use GPT-3.5-turbo instead of GPT-4 (available to all accounts)
-        self.chat_model = os.getenv("CHAT_MODEL", "gpt-3.5-turbo")
+        # Always use GPT-3.5-turbo (available to all accounts, cost-effective)
+        self.chat_model = "gpt-3.5-turbo"
         print(f"🤖 Using chat model: {self.chat_model}")
         
     async def generate_embedding(self, text: str) -> np.ndarray:
@@ -142,7 +142,7 @@ class RAGService:
             return None, 0.0
     
     async def generate_answer(self, question: str) -> str:
-        """Generate answer using OpenAI GPT-3.5-turbo (available to all accounts)"""
+        """Generate answer using OpenAI GPT-3.5-turbo"""
         if not self.openai_configured:
             return f"""🎭 **Demo Answer**
 
@@ -160,15 +160,16 @@ This is a demonstration response. To get AI-powered answers, please configure yo
 **System Info:**
 - Platform: Render.com
 - Database: Neon PostgreSQL  
+- Model: GPT-3.5-turbo (cost-effective and reliable)
 - Status: Fully operational in demo mode"""
         
         try:
-            print(f"🧠 Generating AI answer using {self.chat_model} for: {question[:50]}...")
+            print(f"🧠 Generating AI answer using GPT-3.5-turbo for: {question[:50]}...")
             
             # Use the stable 0.28.1 API format with GPT-3.5-turbo
             import openai
             response = openai.ChatCompletion.create(
-                model=self.chat_model,  # gpt-3.5-turbo (available to all accounts)
+                model="gpt-3.5-turbo",
                 messages=[
                     {
                         "role": "system", 
@@ -185,55 +186,29 @@ This is a demonstration response. To get AI-powered answers, please configure yo
             )
             
             answer = response['choices'][0]['message']['content'].strip()
-            print(f"✅ AI answer generated successfully using {self.chat_model} ({len(answer)} characters)")
+            print(f"✅ AI answer generated successfully using GPT-3.5-turbo ({len(answer)} characters)")
             return answer
             
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ Error generating answer: {error_msg}")
-            
-            # Check for specific model access errors
-            if "does not exist" in error_msg or "do not have access" in error_msg:
-                print("🔄 Trying fallback to gpt-3.5-turbo...")
-                try:
-                    # Fallback to gpt-3.5-turbo
-                    import openai
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=[
-                            {
-                                "role": "system", 
-                                "content": "You are a helpful assistant that provides accurate, concise, and informative answers."
-                            },
-                            {
-                                "role": "user", 
-                                "content": question
-                            }
-                        ],
-                        max_tokens=500,
-                        temperature=0.7,
-                        timeout=30
-                    )
-                    
-                    answer = response['choices'][0]['message']['content'].strip()
-                    print(f"✅ Fallback successful! Answer generated using gpt-3.5-turbo")
-                    return answer
-                    
-                except Exception as fallback_error:
-                    print(f"❌ Fallback also failed: {str(fallback_error)}")
+            print(f"❌ Error generating answer with GPT-3.5-turbo: {error_msg}")
             
             return f"""I apologize, but I encountered an error while generating an answer to your question: "{question}". 
 
 **Error details:** {error_msg}
 
+**System Configuration:**
+- Model: GPT-3.5-turbo (available to all OpenAI accounts)
+- API: OpenAI 0.28.1 (stable)
+
 **Possible solutions:**
-- If you see "model does not exist" or "do not have access": Your account may not have access to GPT-4. This is normal for new accounts.
-- The system will automatically use GPT-3.5-turbo which is available to all accounts.
-- Make sure your OpenAI account has billing set up and available credits.
+- Make sure your OpenAI account has billing set up and available credits
+- Check if your API key has the correct permissions
+- Verify your internet connection
 
 **Fallback response:** This appears to be a question about {question[:50]}... In a fully configured system, I would provide a comprehensive answer using GPT-3.5-turbo.
 
-Please try again - the system should automatically use the correct model for your account."""
+Please try again - GPT-3.5-turbo should be available to all OpenAI accounts."""
     
     def calculate_cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
         """Calculate cosine similarity between two vectors"""
@@ -251,10 +226,10 @@ Please try again - the system should automatically use the correct model for you
             print(f"❌ Error calculating similarity: {str(e)}")
             return 0.0
 
-print("✅ RAG Service initialized with OpenAI 0.28.1 (stable):")
+print("✅ RAG Service initialized with GPT-3.5-turbo:")
 print(f"- OpenAI configured: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No (demo mode)'}")
+print("- Model: GPT-3.5-turbo (hardcoded, cost-effective)")
 print("- Using scikit-learn for cosine similarity")
 print("- Similarity threshold: 0.8")
 print("- Embedding dimension: 1536 (text-embedding-ada-002)")
-print("- Chat model: gpt-3.5-turbo (available to all accounts)")
 print("- API format: OpenAI 0.28.1 (stable ChatCompletion API)")
