@@ -27,7 +27,7 @@ from schemas import (
     QuestionResponse,
     AnswerResponse
 )
-from rag_service import RAGService
+from enhanced_rag_service import EnhancedRAGService  # Use enhanced service
 import crud
 from simple_pdf_processor import SimplePDFProcessor
 
@@ -35,8 +35,8 @@ from simple_pdf_processor import SimplePDFProcessor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize RAG service
-rag_service = RAGService()
+# Initialize enhanced RAG service
+rag_service = EnhancedRAGService()
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -45,7 +45,7 @@ Base.metadata.create_all(bind=engine)
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
-    logger.info("🚀 Starting PDF RAG Q&A API...")
+    logger.info("🚀 Starting Enhanced PDF RAG Q&A API...")
     
     # Check DATABASE_URL
     database_url = os.getenv("DATABASE_URL")
@@ -64,20 +64,20 @@ async def lifespan(app: FastAPI):
     
     # Check OpenAI
     if os.getenv("OPENAI_API_KEY"):
-        logger.info("🤖 OpenAI API Key configured")
+        logger.info("🤖 OpenAI API Key configured - Enhanced RAG enabled")
     else:
-        logger.info("🎭 Running in demo mode (no OpenAI key)")
+        logger.info("🎭 Running in demo mode - Enhanced RAG with mock responses")
     
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down PDF RAG Q&A API...")
+    logger.info("🛑 Shutting down Enhanced PDF RAG Q&A API...")
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="PDF RAG Q&A API",
-    description="A FastAPI backend for PDF document processing and Q&A using RAG",
-    version="1.0.0",
+    title="Enhanced PDF RAG Q&A API",
+    description="An advanced FastAPI backend for PDF document processing and contextual Q&A using enhanced RAG",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
@@ -121,9 +121,16 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
 async def root():
     """Root endpoint"""
     return {
-        "message": "PDF RAG Q&A API",
-        "version": "1.0.0",
+        "message": "Enhanced PDF RAG Q&A API",
+        "version": "2.0.0",
         "status": "running",
+        "features": [
+            "Contextual question analysis",
+            "Multi-strategy document search",
+            "Semantic similarity matching",
+            "Historical Q&A integration",
+            "Intelligent source attribution"
+        ],
         "endpoints": {
             "health": "/health",
             "auth_health": "/auth/health",
@@ -145,7 +152,7 @@ async def health_check(db: Session = Depends(get_db)):
     
     return HealthResponse(
         status="healthy",
-        message="API is running",
+        message="Enhanced RAG API is running",
         timestamp=datetime.utcnow(),
         database_connected=database_connected,
         openai_configured=rag_service.openai_configured
@@ -166,7 +173,7 @@ async def ask_question(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Ask a question and get an AI-generated answer using RAG"""
+    """Ask a question and get an AI-generated answer using enhanced RAG"""
     try:
         question_text = request.question.strip()
         
@@ -176,35 +183,49 @@ async def ask_question(
                 detail="Question cannot be empty"
             )
         
-        print(f"🔍 Processing question: {question_text[:50]}...")
+        print(f"🔍 Processing question with enhanced RAG: {question_text[:50]}...")
         
-        # Generate embedding for the question
+        # Step 1: Analyze the question to understand intent and context
+        question_analysis = await rag_service.analyze_question_intent(question_text)
+        print(f"🧠 Question analysis: {question_analysis['intent']} ({question_analysis['complexity']})")
+        
+        # Step 2: Generate embedding for semantic search
         query_embedding = await rag_service.generate_embedding(question_text)
         
-        # Search for similar questions
-        similar_question, similarity_score = await rag_service.find_similar_question(
-            db, query_embedding
+        # Step 3: Search for relevant documents using multiple strategies
+        relevant_documents = await rag_service.search_relevant_documents(
+            db, query_embedding, question_analysis, limit=5
         )
         
-        # Determine if we should use cached answer or generate new one
+        # Step 4: Search for relevant historical Q&A pairs
+        historical_qa = await rag_service.search_historical_qa(
+            db, query_embedding, question_analysis, limit=3
+        )
+        
+        # Step 5: Check if we should use a cached answer (high similarity threshold)
         is_cached = False
         answer_text = ""
+        question_id = None
+        answer_id = None
         
-        if similar_question and similarity_score >= rag_service.similarity_threshold:
-            # Use cached answer from similar question
-            print(f"✅ Found similar question (similarity: {similarity_score:.3f})")
-            latest_answer = crud.get_answers_for_question(db, similar_question.id)
-            if latest_answer:
-                answer_text = latest_answer[0].text
+        if historical_qa and len(historical_qa) > 0:
+            best_match = historical_qa[0]
+            if best_match["similarity"] >= 0.95:  # Very high threshold for exact matches
+                print(f"✅ Using cached answer (similarity: {best_match['similarity']:.3f})")
+                answer_text = best_match["answer_text"]
+                question_id = best_match["question_id"]
+                # Get the answer ID
+                latest_answer = crud.get_answers_for_question(db, question_id)
+                if latest_answer:
+                    answer_id = latest_answer[0].id
                 is_cached = True
-                question_id = similar_question.id
-                answer_id = latest_answer[0].id
-                print("📋 Using cached answer")
         
+        # Step 6: Generate new contextual answer if not cached
         if not is_cached:
-            # Generate new answer
-            print("🧠 Generating new answer...")
-            answer_text = await rag_service.generate_answer(question_text)
+            print("🧠 Generating new contextual answer...")
+            answer_text = await rag_service.generate_contextual_answer(
+                question_text, question_analysis, relevant_documents, historical_qa
+            )
             
             # Store new question and answer
             new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
@@ -213,154 +234,37 @@ async def ask_question(
             # Store embedding
             crud.create_embedding(db, question_id, query_embedding)
             
-            # Store answer
+            # Store answer with enhanced confidence scoring
+            confidence_score = 0.95
+            if relevant_documents:
+                confidence_score = min(0.98, 0.8 + (len(relevant_documents) * 0.05))
+            elif historical_qa:
+                confidence_score = 0.85
+            else:
+                confidence_score = 0.75
+            
             new_answer = crud.create_answer(
                 db, 
                 crud.AnswerCreate(
                     question_id=question_id,
                     text=answer_text,
-                    confidence_score=0.95
+                    confidence_score=confidence_score
                 )
             )
             answer_id = new_answer.id
-            print("💾 Stored new question and answer")
+            print("💾 Stored new question and answer with enhanced context")
         
-        # Search for relevant document chunks using better text search
-        relevant_chunks = []
+        # Prepare source documents list
         source_documents = []
-
-        try:
-            # First try vector similarity search if embeddings are available
-            if hasattr(rag_service, 'search_document_chunks'):
-                relevant_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
-            
-            # Fallback to text-based search if no vector search results
-            if not relevant_chunks:
-                # Use PostgreSQL full-text search for better results
-                result = db.execute(text("""
-                    SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
-                           d.original_filename, d.id as doc_id
-                    FROM document_chunks dc
-                    JOIN documents d ON dc.document_id = d.id
-                    WHERE d.processed = true 
-                    AND (
-                        dc.content ILIKE :query1 OR
-                        dc.content ILIKE :query2 OR
-                        to_tsvector('english', dc.content) @@ plainto_tsquery('english', :query3)
-                    )
-                    ORDER BY 
-                        CASE 
-                            WHEN dc.content ILIKE :query1 THEN 1
-                            WHEN dc.content ILIKE :query2 THEN 2
-                            ELSE 3
-                        END,
-                        ts_rank(to_tsvector('english', dc.content), plainto_tsquery('english', :query3)) DESC
-                    LIMIT 5
-                """), {
-                    "query1": f"%{question_text}%",
-                    "query2": f"%{' '.join(question_text.split()[:3])}%",  # First 3 words
-                    "query3": question_text
-                })
-                
-                for row in result:
-                    chunk_id, doc_id, content, page_number, filename, document_id = row
-                    relevant_chunks.append({
-                        "chunk_id": chunk_id,
-                        "document_id": doc_id,
-                        "content": content[:500],  # Limit content length
-                        "page_number": page_number,
-                        "filename": filename
-                    })
-                    if filename not in source_documents:
-                        source_documents.append(filename)
-            
-            print(f"📄 Found {len(relevant_chunks)} relevant document chunks from {len(source_documents)} documents")
-            
-            # If still no results, try broader search
-            if not relevant_chunks:
-                # Search for any documents that might be relevant
-                keywords = question_text.lower().split()
-                keyword_queries = []
-                for keyword in keywords[:5]:  # Use first 5 keywords
-                    if len(keyword) > 3:  # Skip short words
-                        keyword_queries.append(f"dc.content ILIKE '%{keyword}%'")
-                
-                if keyword_queries:
-                    broad_query = f"""
-                        SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
-                               d.original_filename
-                        FROM document_chunks dc
-                        JOIN documents d ON dc.document_id = d.id
-                        WHERE d.processed = true AND ({' OR '.join(keyword_queries)})
-                        LIMIT 3
-                    """
-                    
-                    result = db.execute(text(broad_query))
-                    for row in result:
-                        chunk_id, doc_id, content, page_number, filename = row
-                        relevant_chunks.append({
-                            "chunk_id": chunk_id,
-                            "document_id": doc_id,
-                            "content": content[:500],
-                            "page_number": page_number,
-                            "filename": filename
-                        })
-                        if filename not in source_documents:
-                            source_documents.append(filename)
-                    
-                    print(f"📄 Broad search found {len(relevant_chunks)} additional chunks")
-
-        except Exception as e:
-            print(f"⚠️ Error searching document chunks: {str(e)}")
-
-        # Enhanced context preparation
-        context = ""
-        if relevant_chunks:
-            print(f"🔍 Preparing context from {len(relevant_chunks)} chunks")
-            context_parts = []
-            for i, chunk in enumerate(relevant_chunks):
-                chunk_preview = chunk['content'][:300] + "..." if len(chunk['content']) > 300 else chunk['content']
-                context_parts.append(
-                    f"[Document {i+1}: {chunk['filename']} - Page {chunk['page_number'] or 'N/A'}]\n{chunk_preview}"
-                )
-            
-            context = "\n\n".join(context_parts)
-            print(f"📝 Context prepared: {len(context)} characters")
-
-        # Generate answer with enhanced prompting
-        if not is_cached:
-            print("🧠 Generating new answer with document context...")
-            
-            if context:
-                enhanced_question = f"""You are an AI assistant helping to answer questions based on uploaded documents. 
-
-CONTEXT FROM UPLOADED DOCUMENTS:
-{context}
-
-USER QUESTION: {question_text}
-
-INSTRUCTIONS:
-1. First, carefully analyze the provided context from the uploaded documents
-2. If the context contains relevant information to answer the question, use it as your primary source
-3. Clearly indicate which document(s) you're referencing in your answer
-4. If the context doesn't contain sufficient information, say so and provide a general answer
-5. Be specific about page numbers when referencing document content
-6. Keep your answer concise but comprehensive
-
-Please provide a helpful answer based on the above context and question."""
-            else:
-                # Check if there are any documents at all
-                doc_count = db.query(Document).filter(Document.processed == True).count()
-                if doc_count > 0:
-                    enhanced_question = f"""You are an AI assistant. The user has uploaded {doc_count} document(s) to the system, but none of them appear to contain information directly relevant to this question: "{question_text}"
-
-Please provide a general answer to this question, and suggest that the user might want to upload more specific documents if they're looking for document-based information."""
-                else:
-                    enhanced_question = f"""You are an AI assistant. The user is asking: "{question_text}"
-
-No documents have been uploaded to the system yet. Please provide a general answer to this question and suggest that they can upload relevant documents for more specific, document-based answers."""
-            
-            answer_text = await rag_service.generate_answer(enhanced_question)
+        if relevant_documents:
+            source_documents = list(set([doc["filename"] for doc in relevant_documents]))
+        
+        # Calculate overall similarity score
+        similarity_score = 0.0
+        if historical_qa:
+            similarity_score = historical_qa[0]["similarity"]
+        elif relevant_documents:
+            similarity_score = max([doc["similarity"] for doc in relevant_documents])
         
         return QuestionAnswerResponse(
             answer=answer_text,
@@ -368,7 +272,7 @@ No documents have been uploaded to the system yet. Please provide a general answ
             answer_id=answer_id,
             similarity_score=similarity_score,
             is_cached=is_cached,
-            source_documents=source_documents  # Will be populated when document processing is added
+            source_documents=source_documents
         )
         
     except HTTPException:
@@ -494,7 +398,7 @@ async def upload_document(
             "filename": file.filename,
             "file_size": len(file_content),
             "processing_status": "uploaded",
-            "note": "PDF processing is running in the background. Check back in a few moments."
+            "note": "PDF processing with enhanced RAG is running in the background. The system will extract content, generate embeddings, and enable contextual search."
         }
         
     except HTTPException:
@@ -556,7 +460,9 @@ async def get_stats(
             "documents": document_count,
             "chunks": chunk_count,
             "openai_configured": rag_service.openai_configured,
-            "similarity_threshold": rag_service.similarity_threshold
+            "document_similarity_threshold": rag_service.document_similarity_threshold,
+            "qa_similarity_threshold": rag_service.qa_similarity_threshold,
+            "version": "2.0.0 - Enhanced RAG"
         }
         
     except Exception as e:
