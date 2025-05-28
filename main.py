@@ -27,7 +27,7 @@ from schemas import (
     QuestionResponse,
     AnswerResponse
 )
-from enhanced_rag_service import EnhancedRAGService  # Use enhanced service
+from rag_service import RAGService  # Use the simpler RAG service
 import crud
 from simple_pdf_processor import SimplePDFProcessor
 
@@ -35,8 +35,8 @@ from simple_pdf_processor import SimplePDFProcessor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize enhanced RAG service
-rag_service = EnhancedRAGService()
+# Initialize RAG service
+rag_service = RAGService()
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -45,7 +45,7 @@ Base.metadata.create_all(bind=engine)
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
-    logger.info("🚀 Starting Enhanced PDF RAG Q&A API...")
+    logger.info("🚀 Starting PDF RAG Q&A API...")
     
     # Check DATABASE_URL
     database_url = os.getenv("DATABASE_URL")
@@ -64,20 +64,20 @@ async def lifespan(app: FastAPI):
     
     # Check OpenAI
     if os.getenv("OPENAI_API_KEY"):
-        logger.info("🤖 OpenAI API Key configured - Enhanced RAG enabled")
+        logger.info("🤖 OpenAI API Key configured - RAG enabled")
     else:
-        logger.info("🎭 Running in demo mode - Enhanced RAG with mock responses")
+        logger.info("🎭 Running in demo mode - RAG with mock responses")
     
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down Enhanced PDF RAG Q&A API...")
+    logger.info("🛑 Shutting down PDF RAG Q&A API...")
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Enhanced PDF RAG Q&A API",
-    description="An advanced FastAPI backend for PDF document processing and contextual Q&A using enhanced RAG",
-    version="2.0.0",
+    title="PDF RAG Q&A API",
+    description="A FastAPI backend for PDF document processing and Q&A using RAG",
+    version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
@@ -121,15 +121,14 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
 async def root():
     """Root endpoint"""
     return {
-        "message": "Enhanced PDF RAG Q&A API",
-        "version": "2.0.0",
+        "message": "PDF RAG Q&A API",
+        "version": "1.0.0",
         "status": "running",
         "features": [
-            "Strict prioritization of document content",
-            "Multi-strategy document search",
+            "PDF document processing",
+            "Vector similarity search",
             "Historical Q&A integration",
-            "GPT fallback for unknown questions",
-            "Transparent source attribution"
+            "GPT fallback for unknown questions"
         ],
         "endpoints": {
             "health": "/health",
@@ -152,7 +151,7 @@ async def health_check(db: Session = Depends(get_db)):
     
     return HealthResponse(
         status="healthy",
-        message="Enhanced RAG API is running",
+        message="RAG API is running",
         timestamp=datetime.utcnow(),
         database_connected=database_connected,
         openai_configured=rag_service.openai_configured
@@ -173,7 +172,7 @@ async def ask_question(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Ask a question with strict prioritization: 1) Documents, 2) Historical Q&A, 3) GPT"""
+    """Ask a question with document search first, then historical Q&A, then GPT"""
     try:
         question_text = request.question.strip()
         
@@ -183,62 +182,103 @@ async def ask_question(
                 detail="Question cannot be empty"
             )
         
-        print(f"🔍 Processing question with strict prioritization: {question_text[:50]}...")
+        print(f"🔍 Processing question: {question_text[:50]}...")
         
-        # Step 1: Analyze the question to understand intent and context
-        question_analysis = await rag_service.analyze_question_intent(question_text)
-        print(f"🧠 Question analysis: {question_analysis['intent']} ({question_analysis['complexity']})")
-        
-        # Step 2: Generate embedding for semantic search
+        # Step 1: Generate embedding for semantic search
         query_embedding = await rag_service.generate_embedding(question_text)
         
-        # Step 3: Process the question with strict prioritization
-        response_data = await rag_service.process_question(
-            db, question_text, query_embedding, question_analysis
-        )
+        # Step 2: Search document chunks first
+        document_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
         
-        # Step 4: Store the question and answer if not from historical Q&A
-        if response_data.get("source_type") != "historical":
-            # Store new question
-            new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
-            question_id = new_question.id
+        # Step 3: Search for similar historical questions
+        similar_question, similarity_score = await rag_service.find_similar_question(db, query_embedding)
+        
+        # Step 4: Generate answer based on available context
+        if document_chunks:
+            print(f"✅ Found {len(document_chunks)} relevant document chunks")
+            # Generate answer based on document context
+            context_text = "\n\n".join([f"From {chunk['filename']}: {chunk['content'][:500]}..." for chunk in document_chunks])
             
-            # Store embedding
-            crud.create_embedding(db, question_id, query_embedding)
-            
-            # Store answer
-            new_answer = crud.create_answer(
-                db, 
-                crud.AnswerCreate(
-                    question_id=question_id,
-                    text=response_data['answer'],
-                    confidence_score=response_data['confidence']
+            if rag_service.openai_configured:
+                # Use OpenAI to generate answer from document context
+                import openai
+                response = await openai.ChatCompletion.acreate(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a helpful assistant that answers questions based on the provided document context. Always cite the source documents when possible."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Question: {question_text}\n\nDocument Context:\n{context_text}\n\nPlease answer the question based on the document context provided."
+                        }
+                    ],
+                    max_tokens=500,
+                    temperature=0.3
                 )
-            )
-            answer_id = new_answer.id
-            is_cached = False
+                answer_text = response['choices'][0]['message']['content'].strip()
+            else:
+                # Demo mode - show document context
+                answer_text = f"""📄 **Answer based on uploaded documents:**
+
+{context_text}
+
+**Sources:** {', '.join([chunk['filename'] for chunk in document_chunks])}
+
+*Note: This is demo mode. With OpenAI configured, this would be a comprehensive answer based on the document content above.*"""
             
-            print(f"💾 Stored new question and answer (source: {response_data.get('primary_source')}, confidence: {response_data['confidence']:.2f})")
+            confidence = 0.9
+            source_documents = [chunk['filename'] for chunk in document_chunks]
+            
+        elif similar_question and similarity_score > rag_service.similarity_threshold:
+            print(f"✅ Found similar historical question (similarity: {similarity_score:.3f})")
+            # Use cached answer from similar question
+            latest_answer = db.query(Answer).filter(Answer.question_id == similar_question.id).order_by(Answer.created_at.desc()).first()
+            if latest_answer:
+                answer_text = latest_answer.text
+                confidence = float(latest_answer.confidence_score)
+                source_documents = []
+            else:
+                # Fallback to GPT
+                answer_text = await rag_service.generate_answer(question_text)
+                confidence = 0.7
+                source_documents = []
         else:
-            # Using historical Q&A
-            question_id = response_data.get("question_id")
-            # Get the latest answer for this question
-            latest_answer = crud.get_answers_for_question(db, question_id)
-            answer_id = latest_answer[0].id if latest_answer else None
-            is_cached = True
-            print(f"📚 Using historical Q&A (question_id: {question_id})")
-
-        # Calculate similarity score
-        similarity_score = response_data.get('similarity', 0.0)
-
+            print("⚠️ No relevant documents or similar questions found, using GPT fallback")
+            # Fallback to GPT
+            answer_text = await rag_service.generate_answer(question_text)
+            confidence = 0.7
+            source_documents = []
+        
+        # Step 5: Store the question and answer
+        new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
+        question_id = new_question.id
+        
+        # Store embedding
+        crud.create_embedding(db, question_id, query_embedding)
+        
+        # Store answer
+        new_answer = crud.create_answer(
+            db, 
+            crud.AnswerCreate(
+                question_id=question_id,
+                text=answer_text,
+                confidence_score=confidence
+            )
+        )
+        answer_id = new_answer.id
+        
+        print(f"💾 Stored question and answer (confidence: {confidence:.2f})")
+        
         # Prepare final response
         return QuestionAnswerResponse(
-            answer=response_data['answer'],
+            answer=answer_text,
             question_id=question_id,
             answer_id=answer_id,
             similarity_score=similarity_score,
-            is_cached=is_cached,
-            source_documents=response_data.get('source_documents', [])
+            is_cached=False,
+            source_documents=source_documents
         )
         
     except HTTPException:
@@ -364,7 +404,7 @@ async def upload_document(
             "filename": file.filename,
             "file_size": len(file_content),
             "processing_status": "uploaded",
-            "note": "PDF processing with enhanced RAG is running in the background. The system will extract content, generate embeddings, and enable contextual search."
+            "note": "PDF processing is running in the background. The system will extract content, generate embeddings, and enable search."
         }
         
     except HTTPException:
@@ -426,9 +466,7 @@ async def get_stats(
             "documents": document_count,
             "chunks": chunk_count,
             "openai_configured": rag_service.openai_configured,
-            "document_similarity_threshold": rag_service.document_similarity_threshold,
-            "qa_similarity_threshold": rag_service.qa_similarity_threshold,
-            "version": "2.0.0 - Enhanced RAG with Strict Prioritization"
+            "version": "1.0.0 - PDF RAG with Document Search"
         }
         
     except Exception as e:
@@ -436,6 +474,47 @@ async def get_stats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error getting stats: {str(e)}"
+        )
+
+# Debug endpoint to check document chunks
+@app.get("/debug/chunks")
+async def debug_chunks(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Debug endpoint to check document chunks"""
+    try:
+        # Get all chunks with document info
+        result = db.execute(text("""
+            SELECT dc.id, dc.content, dc.chunk_embedding IS NOT NULL as has_embedding,
+                   d.original_filename, d.processed
+            FROM document_chunks dc
+            JOIN documents d ON dc.document_id = d.id
+            ORDER BY dc.id
+            LIMIT 10
+        """))
+        
+        chunks = []
+        for row in result:
+            chunks.append({
+                "chunk_id": row[0],
+                "content_preview": row[1][:100] + "..." if len(row[1]) > 100 else row[1],
+                "has_embedding": row[2],
+                "filename": row[3],
+                "document_processed": row[4]
+            })
+        
+        return {
+            "chunks": chunks,
+            "total_chunks": len(chunks),
+            "message": "Debug info for document chunks"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in debug endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error in debug endpoint: {str(e)}"
         )
 
 if __name__ == "__main__":
