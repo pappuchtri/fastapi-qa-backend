@@ -216,21 +216,28 @@ async def ask_question(
                 )
             )
             answer_id = new_answer.id
+            is_cached = False
             
             print(f"💾 Stored new question and answer (source: {response_data.get('primary_source')}, confidence: {response_data['confidence']:.2f})")
         else:
             # Using historical Q&A
             question_id = response_data.get("question_id")
-            answer_id = response_data.get("answer_id")
+            # Get the latest answer for this question
+            latest_answer = crud.get_answers_for_question(db, question_id)
+            answer_id = latest_answer[0].id if latest_answer else None
+            is_cached = True
             print(f"📚 Using historical Q&A (question_id: {question_id})")
-        
+
+        # Calculate similarity score
+        similarity_score = response_data.get('similarity', 0.0)
+
         # Prepare final response
         return QuestionAnswerResponse(
             answer=response_data['answer'],
             question_id=question_id,
             answer_id=answer_id,
-            similarity_score=response_data.get('similarity', 0.0),
-            is_cached=response_data.get("source_type") == "historical",
+            similarity_score=similarity_score,
+            is_cached=is_cached,
             source_documents=response_data.get('source_documents', [])
         )
         
