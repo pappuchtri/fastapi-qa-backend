@@ -172,7 +172,7 @@ async def ask_question(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Ask a question with document search first, then historical Q&A, then GPT"""
+    """Ask a question with caching: 1) Check Q&A cache, 2) Search documents, 3) GPT fallback"""
     try:
         question_text = request.question.strip()
         
@@ -187,37 +187,66 @@ async def ask_question(
         # Step 1: Generate embedding for semantic search
         query_embedding = await rag_service.generate_embedding(question_text)
         
-        # Step 2: Search document chunks first
+        # Step 2: First check if we have a similar question in Q&A cache
+        print("🔍 STEP 1: Checking Q&A cache for similar questions...")
+        similar_question, similarity_score = await rag_service.find_similar_question(db, query_embedding)
+        
+        if similar_question and similarity_score > rag_service.similarity_threshold:
+            print(f"✅ Found cached answer (similarity: {similarity_score:.3f})")
+            # Get the most recent answer for this cached question
+            cached_answer = db.query(Answer).filter(
+                Answer.question_id == similar_question.id
+            ).order_by(Answer.created_at.desc()).first()
+            
+            if cached_answer:
+                return QuestionAnswerResponse(
+                    answer=cached_answer.text,
+                    question_id=similar_question.id,
+                    answer_id=cached_answer.id,
+                    similarity_score=similarity_score,
+                    is_cached=True,
+                    source_documents=[]
+                )
+        
+        print("⚠️ No cached answer found, searching documents...")
+        
+        # Step 3: Search document chunks
+        print("🔍 STEP 2: Searching PDF documents...")
         document_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
         
-        # Step 3: Search for similar historical questions
-        similar_question, similarity_score = await rag_service.find_similar_question(db, query_embedding)
+        answer_text = ""
+        confidence = 0.7
+        source_documents = []
         
         # Step 4: Generate answer based on available context
         if document_chunks:
             print(f"✅ Found {len(document_chunks)} relevant document chunks")
             # Generate answer based on document context
-            context_text = "\n\n".join([f"From {chunk['filename']}: {chunk['content'][:500]}..." for chunk in document_chunks])
+            context_text = "\n\n".join([
+                f"From {chunk['filename']} (Page {chunk.get('page_number', 'N/A')}): {chunk['content'][:500]}..." 
+                for chunk in document_chunks
+            ])
             
             if rag_service.openai_configured:
                 # Use OpenAI to generate answer from document context
                 import openai
-                response = await openai.ChatCompletion.acreate(
+                response = openai.ChatCompletion.create(
                     model="gpt-3.5-turbo",
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are a helpful assistant that answers questions based on the provided document context. Always cite the source documents when possible."
+                            "content": "You are a helpful assistant that answers questions based on the provided document context. Always cite the source documents when possible. Be comprehensive and accurate."
                         },
                         {
                             "role": "user",
-                            "content": f"Question: {question_text}\n\nDocument Context:\n{context_text}\n\nPlease answer the question based on the document context provided."
+                            "content": f"Question: {question_text}\n\nDocument Context:\n{context_text}\n\nPlease answer the question based on the document context provided. Include specific references to the source documents."
                         }
                     ],
-                    max_tokens=500,
+                    max_tokens=600,
                     temperature=0.3
                 )
                 answer_text = response['choices'][0]['message']['content'].strip()
+                confidence = 0.95  # High confidence for document-based answers
             else:
                 # Demo mode - show document context
                 answer_text = f"""📄 **Answer based on uploaded documents:**
@@ -227,35 +256,24 @@ async def ask_question(
 **Sources:** {', '.join([chunk['filename'] for chunk in document_chunks])}
 
 *Note: This is demo mode. With OpenAI configured, this would be a comprehensive answer based on the document content above.*"""
+                confidence = 0.9
             
-            confidence = 0.9
-            source_documents = [chunk['filename'] for chunk in document_chunks]
+            source_documents = list(set([chunk['filename'] for chunk in document_chunks]))
+            print(f"📄 Generated answer from {len(source_documents)} documents")
             
-        elif similar_question and similarity_score > rag_service.similarity_threshold:
-            print(f"✅ Found similar historical question (similarity: {similarity_score:.3f})")
-            # Use cached answer from similar question
-            latest_answer = db.query(Answer).filter(Answer.question_id == similar_question.id).order_by(Answer.created_at.desc()).first()
-            if latest_answer:
-                answer_text = latest_answer.text
-                confidence = float(latest_answer.confidence_score)
-                source_documents = []
-            else:
-                # Fallback to GPT
-                answer_text = await rag_service.generate_answer(question_text)
-                confidence = 0.7
-                source_documents = []
         else:
-            print("⚠️ No relevant documents or similar questions found, using GPT fallback")
+            print("⚠️ No relevant documents found, using GPT fallback")
             # Fallback to GPT
             answer_text = await rag_service.generate_answer(question_text)
             confidence = 0.7
             source_documents = []
         
-        # Step 5: Store the question and answer
+        # Step 5: Store the NEW question and answer in Q&A cache
+        print("💾 Storing question and answer in Q&A cache...")
         new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
         question_id = new_question.id
         
-        # Store embedding
+        # Store embedding for future similarity searches
         crud.create_embedding(db, question_id, query_embedding)
         
         # Store answer
@@ -269,15 +287,15 @@ async def ask_question(
         )
         answer_id = new_answer.id
         
-        print(f"💾 Stored question and answer (confidence: {confidence:.2f})")
+        print(f"✅ Cached Q&A pair (ID: {question_id}) for future use")
         
         # Prepare final response
         return QuestionAnswerResponse(
             answer=answer_text,
             question_id=question_id,
             answer_id=answer_id,
-            similarity_score=similarity_score,
-            is_cached=False,
+            similarity_score=0.0,  # New question, no similarity
+            is_cached=False,  # This is a new answer
             source_documents=source_documents
         )
         
@@ -474,6 +492,55 @@ async def get_stats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error getting stats: {str(e)}"
+        )
+
+@app.get("/qa-cache")
+async def get_qa_cache(
+    skip: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get cached Q&A pairs"""
+    try:
+        # Get questions with their latest answers
+        result = db.execute(text("""
+            SELECT q.id, q.text as question, q.created_at,
+                   a.text as answer, a.confidence_score, a.created_at as answer_date
+            FROM questions q
+            JOIN answers a ON q.id = a.question_id
+            WHERE a.id = (
+                SELECT id FROM answers a2 
+                WHERE a2.question_id = q.id 
+                ORDER BY a2.created_at DESC 
+                LIMIT 1
+            )
+            ORDER BY q.created_at DESC
+            LIMIT :limit OFFSET :skip
+        """), {"limit": limit, "skip": skip})
+        
+        qa_pairs = []
+        for row in result:
+            qa_pairs.append({
+                "question_id": row[0],
+                "question": row[1],
+                "question_date": row[2],
+                "answer": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
+                "confidence": float(row[4]),
+                "answer_date": row[5]
+            })
+        
+        return {
+            "qa_pairs": qa_pairs,
+            "total": len(qa_pairs),
+            "message": "Q&A cache retrieved successfully"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting Q&A cache: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting Q&A cache: {str(e)}"
         )
 
 # Debug endpoint to check document chunks
