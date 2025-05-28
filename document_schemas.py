@@ -1,7 +1,49 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+# Base schemas for questions and answers
+class QuestionBase(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1000, description="The question text")
+
+class QuestionCreate(QuestionBase):
+    pass
+
+class QuestionResponse(QuestionBase):
+    id: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class AnswerBase(BaseModel):
+    text: str = Field(..., min_length=1, description="The answer text")
+    confidence_score: Optional[float] = Field(default=0.0, ge=0.0, le=1.0, description="Confidence score between 0 and 1")
+
+class AnswerCreate(AnswerBase):
+    question_id: int
+
+class AnswerResponse(AnswerBase):
+    id: int
+    question_id: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+# Q&A Request/Response schemas
+class QuestionAnswerRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=1000, description="The question to ask")
+
+class QuestionAnswerResponse(BaseModel):
+    answer: str = Field(..., description="The generated answer")
+    question_id: int = Field(..., description="ID of the stored question")
+    answer_id: int = Field(..., description="ID of the stored answer")
+    similarity_score: Optional[float] = Field(default=0.0, description="Similarity score with existing questions")
+    is_cached: bool = Field(default=False, description="Whether the answer was retrieved from cache")
+    source_documents: List[str] = Field(default_factory=list, description="List of source document filenames")
+
+# Document schemas
 class DocumentBase(BaseModel):
     filename: str
     original_filename: str
@@ -14,33 +56,20 @@ class DocumentCreate(DocumentBase):
 class DocumentResponse(DocumentBase):
     id: int
     upload_date: datetime
-    processed: bool
-    processing_status: str
+    processed: bool = False
+    processing_status: str = "pending"
     error_message: Optional[str] = None
     total_pages: Optional[int] = None
     total_chunks: int = 0
-    metadata: Dict[str, Any] = {}
     
     class Config:
         from_attributes = True
 
-class DocumentChunkBase(BaseModel):
-    chunk_index: int
-    content: str
-    page_number: Optional[int] = None
-    word_count: Optional[int] = None
-
-class DocumentChunkCreate(DocumentChunkBase):
-    document_id: int
-
-class DocumentChunkResponse(DocumentChunkBase):
-    id: int
-    document_id: int
-    created_at: datetime
-    metadata: Dict[str, Any] = {}
-    
-    class Config:
-        from_attributes = True
+class DocumentListResponse(BaseModel):
+    documents: List[DocumentResponse]
+    total: int
+    page: int = 1
+    per_page: int = 10
 
 class DocumentUploadResponse(BaseModel):
     message: str
@@ -49,16 +78,10 @@ class DocumentUploadResponse(BaseModel):
     file_size: int
     processing_status: str
 
-class DocumentListResponse(BaseModel):
-    documents: List[DocumentResponse]
-    total: int
-    page: int
-    per_page: int
-
 class DocumentSearchRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=500)
-    document_ids: Optional[List[int]] = None
-    limit: int = Field(5, ge=1, le=20)
+    query: str = Field(..., min_length=1, max_length=500, description="Search query")
+    limit: int = Field(default=5, ge=1, le=20, description="Maximum number of results")
+    document_ids: Optional[List[int]] = Field(default=None, description="Optional list of document IDs to search within")
 
 class DocumentSearchResult(BaseModel):
     chunk_id: int
@@ -67,8 +90,33 @@ class DocumentSearchResult(BaseModel):
     content: str
     page_number: Optional[int]
     similarity_score: float
-    
+
 class DocumentSearchResponse(BaseModel):
     results: List[DocumentSearchResult]
     query: str
     total_results: int
+
+# Health check schemas
+class HealthResponse(BaseModel):
+    status: str
+    message: str
+    timestamp: datetime
+    database_connected: bool
+    openai_configured: bool
+
+class AuthHealthResponse(BaseModel):
+    status: str
+    message: str
+    timestamp: datetime
+
+# Legacy schemas for backward compatibility
+class QuestionRequest(BaseModel):
+    question: str
+
+class ApiKeyResponse(BaseModel):
+    message: str
+    valid: bool
+
+class AuthErrorResponse(BaseModel):
+    detail: str
+    error_code: str = "INVALID_API_KEY"
