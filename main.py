@@ -173,7 +173,7 @@ async def ask_question(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Ask a question and get an AI-generated answer using enhanced RAG"""
+    """Ask a question and get an AI-generated answer using enhanced RAG with intelligent fallback"""
     try:
         question_text = request.question.strip()
         
@@ -202,9 +202,8 @@ async def ask_question(
             db, query_embedding, question_analysis, limit=3
         )
         
-        # Step 5: Check if we should use a cached answer (high similarity threshold)
+        # Step 5: Check if we should use a cached answer (very high similarity threshold)
         is_cached = False
-        answer_text = ""
         question_id = None
         answer_id = None
         
@@ -212,18 +211,27 @@ async def ask_question(
             best_match = historical_qa[0]
             if best_match["similarity"] >= 0.95:  # Very high threshold for exact matches
                 print(f"✅ Using cached answer (similarity: {best_match['similarity']:.3f})")
-                answer_text = best_match["answer_text"]
+                
+                # Get the cached answer details
                 question_id = best_match["question_id"]
-                # Get the answer ID
                 latest_answer = crud.get_answers_for_question(db, question_id)
                 if latest_answer:
                     answer_id = latest_answer[0].id
-                is_cached = True
+                    
+                    response_data = {
+                        'answer': best_match["answer_text"],
+                        'confidence': best_match.get("confidence", 0.95),
+                        'primary_source': 'cached',
+                        'source_documents': []
+                    }
+                    is_cached = True
         
-        # Step 6: Generate new contextual answer if not cached
+        # Step 6: Generate new answer using enhanced RAG with intelligent fallback
         if not is_cached:
-            print("🧠 Generating new contextual answer...")
-            answer_text = await rag_service.generate_contextual_answer(
+            print("🧠 Generating new answer with intelligent fallback logic...")
+            
+            # Use the enhanced contextual answer generation
+            response_data = await rag_service.generate_contextual_answer(
                 question_text, question_analysis, relevant_documents, historical_qa
             )
             
@@ -234,30 +242,18 @@ async def ask_question(
             # Store embedding
             crud.create_embedding(db, question_id, query_embedding)
             
-            # Store answer with enhanced confidence scoring
-            confidence_score = 0.95
-            if relevant_documents:
-                confidence_score = min(0.98, 0.8 + (len(relevant_documents) * 0.05))
-            elif historical_qa:
-                confidence_score = 0.85
-            else:
-                confidence_score = 0.75
-            
+            # Store answer with the confidence from the response
             new_answer = crud.create_answer(
                 db, 
                 crud.AnswerCreate(
                     question_id=question_id,
-                    text=answer_text,
-                    confidence_score=confidence_score
+                    text=response_data['answer'],
+                    confidence_score=response_data['confidence']
                 )
             )
             answer_id = new_answer.id
-            print("💾 Stored new question and answer with enhanced context")
-        
-        # Prepare source documents list
-        source_documents = []
-        if relevant_documents:
-            source_documents = list(set([doc["filename"] for doc in relevant_documents]))
+            
+            print(f"💾 Stored new question and answer (source: {response_data['primary_source']}, confidence: {response_data['confidence']:.2f})")
         
         # Calculate overall similarity score
         similarity_score = 0.0
@@ -266,13 +262,14 @@ async def ask_question(
         elif relevant_documents:
             similarity_score = max([doc["similarity"] for doc in relevant_documents])
         
+        # Prepare final response
         return QuestionAnswerResponse(
-            answer=answer_text,
+            answer=response_data['answer'],
             question_id=question_id,
             answer_id=answer_id,
             similarity_score=similarity_score,
             is_cached=is_cached,
-            source_documents=source_documents
+            source_documents=response_data.get('source_documents', [])
         )
         
     except HTTPException:
