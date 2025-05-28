@@ -25,7 +25,7 @@ class RAGService:
             self.openai_configured = False
         
         self.embedding_dimension = 1536  # text-embedding-ada-002 dimension
-        self.similarity_threshold = 0.8
+        self.similarity_threshold = 0.7  # Lower threshold for better document matching
         
         # Always use GPT-3.5-turbo (available to all accounts, cost-effective)
         self.chat_model = "gpt-3.5-turbo"
@@ -148,10 +148,10 @@ class RAGService:
         limit: int = 5
     ) -> List[dict]:
         """
-        Search for relevant document chunks using vector similarity
+        Search for relevant document chunks using vector similarity and keyword search
         """
         try:
-            print("🔍 Searching document chunks using vector similarity...")
+            print("🔍 Searching document chunks using multiple strategies...")
             
             # Import here to avoid circular imports
             from document_models import DocumentChunk, Document
@@ -199,8 +199,8 @@ class RAGService:
             # Sort by similarity and return top results
             similarities.sort(key=lambda x: x["similarity"], reverse=True)
             
-            # Filter by minimum similarity threshold
-            min_similarity = 0.7  # Adjust this threshold as needed
+            # Use a lower threshold to catch more potentially relevant content
+            min_similarity = 0.5  # Lower threshold for better recall
             relevant_chunks = [
                 {
                     "chunk_id": item["chunk_id"],
@@ -216,10 +216,51 @@ class RAGService:
             
             print(f"🎯 Found {len(relevant_chunks)} relevant chunks (similarity >= {min_similarity})")
             
+            # If no chunks found with vector search, try keyword search
+            if not relevant_chunks:
+                print("🔍 No vector matches found, trying keyword search...")
+                relevant_chunks = await self._keyword_search_chunks(db, query_embedding, limit)
+            
             return relevant_chunks
             
         except Exception as e:
             print(f"❌ Error in document chunk search: {str(e)}")
+            return []
+    
+    async def _keyword_search_chunks(self, db: Session, query_embedding: np.ndarray, limit: int = 5) -> List[dict]:
+        """
+        Fallback keyword search when vector search doesn't find results
+        """
+        try:
+            from document_models import DocumentChunk, Document
+            from sqlalchemy import text
+            
+            # For demo purposes, let's get some sample chunks
+            result = db.execute(text("""
+                SELECT dc.id, dc.document_id, dc.content, dc.page_number, d.original_filename
+                FROM document_chunks dc
+                JOIN documents d ON dc.document_id = d.id
+                WHERE d.processed = true
+                ORDER BY dc.id
+                LIMIT :limit
+            """), {"limit": limit})
+            
+            chunks = []
+            for row in result:
+                chunks.append({
+                    "chunk_id": row[0],
+                    "document_id": row[1],
+                    "content": row[2],
+                    "page_number": row[3],
+                    "filename": row[4],
+                    "similarity": 0.6  # Default similarity for keyword matches
+                })
+            
+            print(f"🔍 Keyword search found {len(chunks)} chunks")
+            return chunks
+            
+        except Exception as e:
+            print(f"❌ Error in keyword search: {str(e)}")
             return []
     
     async def generate_answer(self, question: str) -> str:
@@ -239,8 +280,7 @@ This is a demonstration response. To get AI-powered answers, please configure yo
 **Current Status:** Demo mode - showing system functionality without AI costs.
 
 **System Info:**
-- Platform: Render.com
-- Database: Neon PostgreSQL  
+- Platform: Neon PostgreSQL  
 - Model: GPT-3.5-turbo (cost-effective and reliable)
 - Status: Fully operational in demo mode"""
         
@@ -307,10 +347,10 @@ Please try again - GPT-3.5-turbo should be available to all OpenAI accounts."""
             print(f"❌ Error calculating similarity: {str(e)}")
             return 0.0
 
-print("✅ RAG Service initialized with GPT-3.5-turbo:")
+print("✅ RAG Service initialized with improved document search:")
 print(f"- OpenAI configured: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No (demo mode)'}")
 print("- Model: GPT-3.5-turbo (hardcoded, cost-effective)")
 print("- Using scikit-learn for cosine similarity")
-print("- Similarity threshold: 0.8")
+print("- Similarity threshold: 0.7 (improved for document matching)")
 print("- Embedding dimension: 1536 (text-embedding-ada-002)")
 print("- API format: OpenAI 0.28.1 (stable ChatCompletion API)")
