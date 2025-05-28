@@ -28,11 +28,13 @@ class EnhancedRAGService:
             self.openai_configured = False
         
         self.embedding_dimension = 1536  # text-embedding-ada-002 dimension
-        self.document_similarity_threshold = 0.65  # Lowered to be more inclusive for document content
-        self.qa_similarity_threshold = 0.85  # Higher threshold for historical Q&A to ensure relevance
+        # Much lower thresholds to be more inclusive of PDF content
+        self.document_similarity_threshold = 0.3  # Very low to catch any potentially relevant content
+        self.qa_similarity_threshold = 0.85  # High threshold for historical Q&A
         self.chat_model = "gpt-3.5-turbo"
         
         print(f"🤖 Enhanced RAG Service initialized with {self.chat_model}")
+        print(f"📄 Document similarity threshold: {self.document_similarity_threshold} (very inclusive)")
         
     async def generate_embedding(self, text: str) -> np.ndarray:
         """Generate embedding for given text using OpenAI text-embedding-ada-002"""
@@ -74,12 +76,12 @@ class EnhancedRAGService:
         try:
             if not self.openai_configured:
                 # Simple keyword extraction for demo mode
-                keywords = [word.lower() for word in re.findall(r'\b\w+\b', question) if len(word) > 3]
+                keywords = [word.lower() for word in re.findall(r'\b\w+\b', question) if len(word) > 2]
                 return {
                     "intent": "general_inquiry",
-                    "keywords": keywords[:10],
+                    "keywords": keywords[:15],  # More keywords for better search
                     "question_type": "factual",
-                    "requires_documents": len(keywords) > 2,
+                    "requires_documents": True,
                     "complexity": "medium"
                 }
             
@@ -115,10 +117,10 @@ Provide only the JSON response, no additional text."""
                 return analysis
             except json.JSONDecodeError:
                 # Fallback if JSON parsing fails
-                keywords = [word.lower() for word in re.findall(r'\b\w+\b', question) if len(word) > 3]
+                keywords = [word.lower() for word in re.findall(r'\b\w+\b', question) if len(word) > 2]
                 return {
                     "intent": "general_inquiry",
-                    "keywords": keywords[:10],
+                    "keywords": keywords[:15],
                     "question_type": "factual",
                     "requires_documents": True,
                     "complexity": "medium"
@@ -127,81 +129,104 @@ Provide only the JSON response, no additional text."""
         except Exception as e:
             print(f"⚠️ Error in question analysis: {str(e)}")
             # Fallback analysis
-            keywords = [word.lower() for word in re.findall(r'\b\w+\b', question) if len(word) > 3]
+            keywords = [word.lower() for word in re.findall(r'\b\w+\b', question) if len(word) > 2]
             return {
                 "intent": "general_inquiry",
-                "keywords": keywords[:10],
+                "keywords": keywords[:15],
                 "question_type": "factual",
                 "requires_documents": True,
                 "complexity": "medium"
             }
     
-    async def search_relevant_documents(
+    async def exhaustive_pdf_search(
         self, 
         db: Session, 
+        question: str,
         query_embedding: np.ndarray,
-        question_analysis: Dict[str, Any],
-        limit: int = 5
+        question_analysis: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Search for relevant document chunks using multiple strategies
+        Perform exhaustive search through ALL PDF documents using multiple strategies
         """
-        try:
-            print("🔍 Searching for relevant document chunks (PRIORITY 1)...")
-            
-            # First check if there are any documents at all
-            doc_count = db.query(Document).filter(Document.processed == True).count()
-            if doc_count == 0:
-                print("📚 No processed documents found in the database")
-                return []
-            
-            relevant_chunks = []
-            
-            # Strategy 1: Vector similarity search (most accurate)
-            vector_chunks = await self._vector_similarity_search(db, query_embedding, limit)
-            if vector_chunks:
-                print(f"✅ Found {len(vector_chunks)} relevant chunks via vector search")
-                relevant_chunks.extend(vector_chunks)
-            
-            # Strategy 2: Entity-based search (more precise than keywords)
-            if question_analysis.get("specific_entities") and len(relevant_chunks) < limit:
-                entity_chunks = await self._entity_search(db, question_analysis["specific_entities"], limit)
-                if entity_chunks:
-                    print(f"✅ Found {len(entity_chunks)} relevant chunks via entity search")
-                    relevant_chunks.extend(entity_chunks)
-            
-            # Strategy 3: Keyword-based search (fallback)
-            if len(relevant_chunks) < limit:
-                keyword_chunks = await self._keyword_search(db, question_analysis.get("keywords", []), limit)
-                if keyword_chunks:
-                    print(f"✅ Found {len(keyword_chunks)} relevant chunks via keyword search")
-                    relevant_chunks.extend(keyword_chunks)
-            
-            # Strategy 4: Broad search (last resort)
-            if len(relevant_chunks) == 0:
-                print("⚠️ No relevant chunks found, trying broad search...")
-                broad_chunks = await self._broad_search(db, question_analysis.get("keywords", []), limit)
-                if broad_chunks:
-                    print(f"✅ Found {len(broad_chunks)} chunks via broad search")
-                    relevant_chunks.extend(broad_chunks)
-            
-            # Remove duplicates and rank by relevance
-            unique_chunks = self._deduplicate_and_rank_chunks(relevant_chunks, query_embedding)
-            
-            print(f"📄 Found {len(unique_chunks)} relevant document chunks")
-            return unique_chunks[:limit]
-            
-        except Exception as e:
-            print(f"❌ Error in document search: {str(e)}")
+        print("🔍 STEP 1: EXHAUSTIVE PDF DOCUMENT SEARCH")
+        print("=" * 60)
+        
+        # Check if there are any documents at all
+        doc_count = db.query(Document).filter(Document.processed == True).count()
+        if doc_count == 0:
+            print("❌ No processed documents found in the database")
             return []
+        
+        print(f"📚 Found {doc_count} processed documents in database")
+        
+        # Get all document information
+        documents = db.query(Document).filter(Document.processed == True).all()
+        for doc in documents:
+            print(f"   📄 {doc.original_filename} ({doc.total_chunks} chunks)")
+        
+        all_relevant_chunks = []
+        
+        # Strategy 1: Vector similarity search (with very low threshold)
+        print("\n🔍 Strategy 1: Vector Similarity Search")
+        vector_chunks = await self._comprehensive_vector_search(db, query_embedding)
+        if vector_chunks:
+            print(f"✅ Found {len(vector_chunks)} chunks via vector search")
+            all_relevant_chunks.extend(vector_chunks)
+        else:
+            print("⚠️ No chunks found via vector search")
+        
+        # Strategy 2: Comprehensive keyword search
+        print("\n🔍 Strategy 2: Comprehensive Keyword Search")
+        keyword_chunks = await self._comprehensive_keyword_search(db, question_analysis.get("keywords", []))
+        if keyword_chunks:
+            print(f"✅ Found {len(keyword_chunks)} chunks via keyword search")
+            all_relevant_chunks.extend(keyword_chunks)
+        else:
+            print("⚠️ No chunks found via keyword search")
+        
+        # Strategy 3: Entity and phrase search
+        print("\n🔍 Strategy 3: Entity and Phrase Search")
+        entity_chunks = await self._comprehensive_entity_search(db, question, question_analysis)
+        if entity_chunks:
+            print(f"✅ Found {len(entity_chunks)} chunks via entity search")
+            all_relevant_chunks.extend(entity_chunks)
+        else:
+            print("⚠️ No chunks found via entity search")
+        
+        # Strategy 4: Fuzzy text search
+        print("\n🔍 Strategy 4: Fuzzy Text Search")
+        fuzzy_chunks = await self._fuzzy_text_search(db, question)
+        if fuzzy_chunks:
+            print(f"✅ Found {len(fuzzy_chunks)} chunks via fuzzy search")
+            all_relevant_chunks.extend(fuzzy_chunks)
+        else:
+            print("⚠️ No chunks found via fuzzy search")
+        
+        # Strategy 5: Broad content sampling (last resort)
+        if not all_relevant_chunks:
+            print("\n🔍 Strategy 5: Broad Content Sampling (Last Resort)")
+            broad_chunks = await self._sample_all_documents(db)
+            if broad_chunks:
+                print(f"✅ Sampled {len(broad_chunks)} chunks from all documents")
+                all_relevant_chunks.extend(broad_chunks)
+        
+        # Remove duplicates and rank by relevance
+        unique_chunks = self._deduplicate_and_rank_chunks(all_relevant_chunks, query_embedding)
+        
+        print(f"\n📊 TOTAL RELEVANT CHUNKS FOUND: {len(unique_chunks)}")
+        if unique_chunks:
+            print("📄 Top matches:")
+            for i, chunk in enumerate(unique_chunks[:3], 1):
+                print(f"   {i}. {chunk['filename']} (Page {chunk.get('page_number', 'N/A')}) - Similarity: {chunk['similarity']:.3f}")
+        
+        return unique_chunks
     
-    async def _vector_similarity_search(
+    async def _comprehensive_vector_search(
         self, 
         db: Session, 
-        query_embedding: np.ndarray, 
-        limit: int
+        query_embedding: np.ndarray
     ) -> List[Dict[str, Any]]:
-        """Vector-based similarity search"""
+        """Comprehensive vector-based similarity search with very low threshold"""
         try:
             chunks = db.query(DocumentChunk).join(Document).filter(
                 DocumentChunk.chunk_embedding.isnot(None),
@@ -221,6 +246,7 @@ Provide only the JSON response, no additional text."""
                                 np.linalg.norm(query_embedding) * np.linalg.norm(chunk_vector)
                             )
                             
+                            # Very low threshold to catch any potentially relevant content
                             if similarity >= self.document_similarity_threshold:
                                 similarities.append({
                                     "chunk_id": chunk.id,
@@ -235,127 +261,197 @@ Provide only the JSON response, no additional text."""
                     continue
             
             similarities.sort(key=lambda x: x["similarity"], reverse=True)
-            return similarities[:limit]
+            return similarities
             
         except Exception as e:
             print(f"⚠️ Error in vector search: {str(e)}")
             return []
     
-    async def _keyword_search(
+    async def _comprehensive_keyword_search(
         self, 
         db: Session, 
-        keywords: List[str], 
-        limit: int
+        keywords: List[str]
     ) -> List[Dict[str, Any]]:
-        """Keyword-based search with TF-IDF-like scoring"""
+        """Comprehensive keyword search with multiple variations"""
         try:
             if not keywords:
                 return []
             
-            # Build dynamic query for keyword search
-            keyword_conditions = []
-            params = {}
+            all_chunks = []
             
-            for i, keyword in enumerate(keywords[:10]):  # Limit to 10 keywords
+            # Search for individual keywords
+            for keyword in keywords:
                 if len(keyword) > 2:  # Skip very short words
-                    param_name = f"keyword_{i}"
-                    keyword_conditions.append(f"dc.content ILIKE :{param_name}")
-                    params[param_name] = f"%{keyword}%"
+                    query = """
+                        SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
+                               d.original_filename
+                        FROM document_chunks dc
+                        JOIN documents d ON dc.document_id = d.id
+                        WHERE d.processed = true AND dc.content ILIKE :keyword
+                        ORDER BY dc.id
+                    """
+                    
+                    result = db.execute(text(query), {"keyword": f"%{keyword}%"})
+                    
+                    for row in result:
+                        all_chunks.append({
+                            "chunk_id": row[0],
+                            "document_id": row[1],
+                            "content": row[2],
+                            "page_number": row[3],
+                            "filename": row[4],
+                            "similarity": 0.7,  # Fixed similarity for keyword matches
+                            "search_method": "keyword",
+                            "matched_keyword": keyword
+                        })
             
-            if not keyword_conditions:
-                return []
+            # Search for keyword combinations
+            if len(keywords) > 1:
+                for i in range(len(keywords) - 1):
+                    for j in range(i + 1, len(keywords)):
+                        keyword1, keyword2 = keywords[i], keywords[j]
+                        if len(keyword1) > 2 and len(keyword2) > 2:
+                            query = """
+                                SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
+                                       d.original_filename
+                                FROM document_chunks dc
+                                JOIN documents d ON dc.document_id = d.id
+                                WHERE d.processed = true 
+                                AND dc.content ILIKE :keyword1 
+                                AND dc.content ILIKE :keyword2
+                                ORDER BY dc.id
+                            """
+                            
+                            result = db.execute(text(query), {
+                                "keyword1": f"%{keyword1}%",
+                                "keyword2": f"%{keyword2}%"
+                            })
+                            
+                            for row in result:
+                                all_chunks.append({
+                                    "chunk_id": row[0],
+                                    "document_id": row[1],
+                                    "content": row[2],
+                                    "page_number": row[3],
+                                    "filename": row[4],
+                                    "similarity": 0.8,  # Higher similarity for multiple keyword matches
+                                    "search_method": "keyword_combo",
+                                    "matched_keywords": [keyword1, keyword2]
+                                })
             
-            query = f"""
-                SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
-                       d.original_filename,
-                       ({' + '.join([f"CASE WHEN dc.content ILIKE :{param} THEN 1 ELSE 0 END" for param in params.keys()])}) as keyword_score
-                FROM document_chunks dc
-                JOIN documents d ON dc.document_id = d.id
-                WHERE d.processed = true AND ({' OR '.join(keyword_conditions)})
-                ORDER BY keyword_score DESC, dc.id
-                LIMIT :limit
-            """
-            
-            params["limit"] = limit
-            result = db.execute(text(query), params)
-            
-            chunks = []
-            for row in result:
-                chunks.append({
-                    "chunk_id": row[0],
-                    "document_id": row[1],
-                    "content": row[2],
-                    "page_number": row[3],
-                    "filename": row[4],
-                    "similarity": float(row[5]) / len(keywords),  # Normalize score
-                    "search_method": "keyword"
-                })
-            
-            return chunks
+            return all_chunks
             
         except Exception as e:
             print(f"⚠️ Error in keyword search: {str(e)}")
             return []
     
-    async def _entity_search(
+    async def _comprehensive_entity_search(
         self, 
         db: Session, 
-        entities: List[str], 
-        limit: int
+        question: str,
+        question_analysis: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Search for specific entities or proper nouns"""
+        """Search for entities, proper nouns, and important phrases"""
         try:
-            entity_conditions = []
-            params = {}
+            all_chunks = []
             
-            for i, entity in enumerate(entities[:5]):  # Limit to 5 entities
-                param_name = f"entity_{i}"
-                # Use word boundaries for more precise matching
-                entity_conditions.append(f"dc.content ~* :{param_name}")
-                params[param_name] = f"\\b{re.escape(entity)}\\b"
+            # Extract potential entities from the question
+            entities = question_analysis.get("specific_entities", [])
             
-            if not entity_conditions:
-                return []
+            # Also extract capitalized words as potential entities
+            capitalized_words = re.findall(r'\b[A-Z][a-z]+\b', question)
+            entities.extend(capitalized_words)
             
-            query = f"""
-                SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
-                       d.original_filename
-                FROM document_chunks dc
-                JOIN documents d ON dc.document_id = d.id
-                WHERE d.processed = true AND ({' OR '.join(entity_conditions)})
-                LIMIT :limit
-            """
+            # Extract quoted phrases
+            quoted_phrases = re.findall(r'"([^"]*)"', question)
+            entities.extend(quoted_phrases)
             
-            params["limit"] = limit
-            result = db.execute(text(query), params)
+            # Remove duplicates
+            entities = list(set(entities))
             
-            chunks = []
-            for row in result:
-                chunks.append({
-                    "chunk_id": row[0],
-                    "document_id": row[1],
-                    "content": row[2],
-                    "page_number": row[3],
-                    "filename": row[4],
-                    "similarity": 0.9,  # High relevance for entity matches
-                    "search_method": "entity"
-                })
+            for entity in entities:
+                if len(entity) > 2:
+                    # Search for exact entity matches
+                    query = """
+                        SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
+                               d.original_filename
+                        FROM document_chunks dc
+                        JOIN documents d ON dc.document_id = d.id
+                        WHERE d.processed = true AND dc.content ~* :entity
+                        ORDER BY dc.id
+                    """
+                    
+                    result = db.execute(text(query), {"entity": f"\\b{re.escape(entity)}\\b"})
+                    
+                    for row in result:
+                        all_chunks.append({
+                            "chunk_id": row[0],
+                            "document_id": row[1],
+                            "content": row[2],
+                            "page_number": row[3],
+                            "filename": row[4],
+                            "similarity": 0.9,  # High relevance for entity matches
+                            "search_method": "entity",
+                            "matched_entity": entity
+                        })
             
-            return chunks
+            return all_chunks
             
         except Exception as e:
             print(f"⚠️ Error in entity search: {str(e)}")
             return []
     
-    async def _broad_search(
+    async def _fuzzy_text_search(
         self, 
         db: Session, 
-        keywords: List[str], 
-        limit: int
+        question: str
     ) -> List[Dict[str, Any]]:
-        """Broad search as a last resort when other methods fail"""
+        """Fuzzy text search for partial matches"""
         try:
-            # Get a sample of chunks from each document
+            # Extract meaningful phrases from the question
+            words = question.lower().split()
+            meaningful_words = [word for word in words if len(word) > 3 and word not in ['what', 'where', 'when', 'how', 'why', 'which', 'that', 'this', 'with', 'from', 'they', 'have', 'been', 'were', 'said', 'each', 'their']]
+            
+            all_chunks = []
+            
+            for word in meaningful_words:
+                # Use PostgreSQL's similarity function if available, otherwise use ILIKE
+                query = """
+                    SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
+                           d.original_filename
+                    FROM document_chunks dc
+                    JOIN documents d ON dc.document_id = d.id
+                    WHERE d.processed = true AND dc.content ILIKE :word
+                    ORDER BY dc.id
+                """
+                
+                result = db.execute(text(query), {"word": f"%{word}%"})
+                
+                for row in result:
+                    all_chunks.append({
+                        "chunk_id": row[0],
+                        "document_id": row[1],
+                        "content": row[2],
+                        "page_number": row[3],
+                        "filename": row[4],
+                        "similarity": 0.6,  # Medium relevance for fuzzy matches
+                        "search_method": "fuzzy",
+                        "matched_word": word
+                    })
+            
+            return all_chunks
+            
+        except Exception as e:
+            print(f"⚠️ Error in fuzzy search: {str(e)}")
+            return []
+    
+    async def _sample_all_documents(
+        self, 
+        db: Session
+    ) -> List[Dict[str, Any]]:
+        """Sample content from all documents as a last resort"""
+        try:
+            # Get a representative sample from each document
             query = """
                 WITH ranked_chunks AS (
                     SELECT 
@@ -364,18 +460,18 @@ Provide only the JSON response, no additional text."""
                         dc.content, 
                         dc.page_number,
                         d.original_filename,
-                        ROW_NUMBER() OVER (PARTITION BY dc.document_id ORDER BY dc.id) as rn
+                        ROW_NUMBER() OVER (PARTITION BY dc.document_id ORDER BY dc.chunk_index) as rn
                     FROM document_chunks dc
                     JOIN documents d ON dc.document_id = d.id
                     WHERE d.processed = true
                 )
                 SELECT id, document_id, content, page_number, original_filename
                 FROM ranked_chunks
-                WHERE rn <= 2  -- Get first 2 chunks from each document
-                LIMIT :limit
+                WHERE rn <= 3  -- Get first 3 chunks from each document
+                ORDER BY document_id, rn
             """
             
-            result = db.execute(text(query), {"limit": limit})
+            result = db.execute(text(query))
             
             chunks = []
             for row in result:
@@ -385,14 +481,14 @@ Provide only the JSON response, no additional text."""
                     "content": row[2],
                     "page_number": row[3],
                     "filename": row[4],
-                    "similarity": 0.5,  # Low confidence for broad search
-                    "search_method": "broad"
+                    "similarity": 0.4,  # Low confidence for broad sampling
+                    "search_method": "sample"
                 })
             
             return chunks
             
         except Exception as e:
-            print(f"⚠️ Error in broad search: {str(e)}")
+            print(f"⚠️ Error in document sampling: {str(e)}")
             return []
     
     def _deduplicate_and_rank_chunks(
@@ -411,7 +507,7 @@ Provide only the JSON response, no additional text."""
                 unique_chunks.append(chunk)
         
         # Sort by similarity score, then by search method priority
-        method_priority = {"vector": 4, "entity": 3, "keyword": 2, "broad": 1}
+        method_priority = {"vector": 5, "entity": 4, "keyword_combo": 3, "keyword": 2, "fuzzy": 1, "sample": 0}
         
         unique_chunks.sort(
             key=lambda x: (
@@ -434,13 +530,17 @@ Provide only the JSON response, no additional text."""
         Search for relevant historical Q&A pairs using semantic similarity
         """
         try:
-            print("🔍 Searching historical Q&A pairs (PRIORITY 2)...")
+            print("\n🔍 STEP 2: CHECKING HISTORICAL Q&A DATABASE")
+            print("=" * 60)
             
             # Get all question embeddings
             embeddings = db.query(Embedding).all()
             
             if not embeddings:
+                print("📚 No historical Q&A pairs found")
                 return []
+            
+            print(f"📚 Found {len(embeddings)} historical Q&A pairs to check")
             
             relevant_qa = []
             
@@ -481,7 +581,13 @@ Provide only the JSON response, no additional text."""
             # Sort by similarity
             relevant_qa.sort(key=lambda x: x["similarity"], reverse=True)
             
-            print(f"📚 Found {len(relevant_qa)} relevant historical Q&A pairs")
+            if relevant_qa:
+                print(f"✅ Found {len(relevant_qa)} relevant historical Q&A pairs")
+                for i, qa in enumerate(relevant_qa[:3], 1):
+                    print(f"   {i}. Similarity: {qa['similarity']:.3f} - Q: {qa['question_text'][:60]}...")
+            else:
+                print("⚠️ No relevant historical Q&A pairs found")
+            
             return relevant_qa[:limit]
             
         except Exception as e:
@@ -496,39 +602,31 @@ Provide only the JSON response, no additional text."""
         question_analysis: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Process a question following the strict priority order:
-        1. Check uploaded PDFs
-        2. Check historical Q&A
-        3. Fallback to GPT
+        Process a question with exhaustive PDF search first, then Q&A, then GPT
         """
-        print("🔄 Processing question with strict priority order...")
+        print("🔄 PROCESSING QUESTION WITH EXHAUSTIVE PDF PRIORITY")
+        print("=" * 80)
         
-        # STEP 1: Check if there are any documents in the database
-        doc_count = db.query(Document).filter(Document.processed == True).count()
-        has_documents = doc_count > 0
+        # STEP 1: EXHAUSTIVE PDF DOCUMENT SEARCH
+        document_chunks = await self.exhaustive_pdf_search(
+            db, question, query_embedding, question_analysis
+        )
         
-        if has_documents:
-            print(f"📚 Found {doc_count} processed documents in database")
+        # If we found ANY relevant document chunks, use them to generate an answer
+        if document_chunks:
+            print(f"\n✅ SUCCESS: Found {len(document_chunks)} relevant chunks in PDF documents")
+            print("🎯 GENERATING ANSWER FROM PDF CONTENT")
             
-            # Search for relevant document chunks
-            document_chunks = await self.search_relevant_documents(
-                db, query_embedding, question_analysis, limit=5
+            document_answer = await self._generate_document_based_answer(
+                question, question_analysis, document_chunks, []
             )
-            
-            # If we found relevant document chunks, use them to generate an answer
-            if document_chunks:
-                print("✅ PRIORITY 1: Using document-based answer generation")
-                document_answer = await self._generate_document_based_answer(
-                    question, question_analysis, document_chunks, []
-                )
-                document_answer["source_type"] = "document"
-                return document_answer
-            else:
-                print("⚠️ No relevant document chunks found despite having documents")
-        else:
-            print("⚠️ No processed documents found in database")
+            document_answer["source_type"] = "document"
+            document_answer["total_chunks_found"] = len(document_chunks)
+            return document_answer
         
-        # STEP 2: Check historical Q&A
+        print("\n⚠️ NO RELEVANT CONTENT FOUND IN PDF DOCUMENTS")
+        
+        # STEP 2: Check historical Q&A only if no PDF content found
         historical_qa = await self.search_historical_qa(
             db, query_embedding, question_analysis, limit=3
         )
@@ -536,52 +634,28 @@ Provide only the JSON response, no additional text."""
         if historical_qa:
             best_match = historical_qa[0]
             if best_match["similarity"] >= self.qa_similarity_threshold:
-                print(f"✅ PRIORITY 2: Using historical Q&A (similarity: {best_match['similarity']:.3f})")
+                print(f"\n✅ SUCCESS: Using historical Q&A (similarity: {best_match['similarity']:.3f})")
                 return {
                     "answer": best_match["answer_text"],
                     "confidence": best_match.get("confidence", 0.9),
                     "primary_source": "historical_qa",
                     "source_documents": [],
                     "source_type": "historical",
-                    "question_id": best_match["question_id"],  # Add this line
-                    "similarity": best_match["similarity"]     # Add this line
+                    "question_id": best_match["question_id"],
+                    "similarity": best_match["similarity"]
                 }
         
-        # STEP 3: Fallback to GPT
-        print("✅ PRIORITY 3: Falling back to GPT-3.5 Turbo")
+        print("\n⚠️ NO RELEVANT HISTORICAL Q&A FOUND")
+        
+        # STEP 3: Fallback to GPT only as last resort
+        print("\n🤖 STEP 3: FALLING BACK TO GPT-3.5 TURBO")
+        print("=" * 60)
         gpt_answer = await self._generate_gpt_fallback_answer(
             question, question_analysis, [], historical_qa
         )
         gpt_answer["source_type"] = "gpt"
         return gpt_answer
     
-    async def generate_contextual_answer(
-        self, 
-        question: str,
-        question_analysis: Dict[str, Any],
-        document_context: List[Dict[str, Any]],
-        historical_qa: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Generate a comprehensive answer using all available context with intelligent fallback
-        Returns dict with answer, confidence, and source information
-        """
-        try:
-            if not self.openai_configured:
-                return self._generate_demo_answer_with_fallback(question, question_analysis, document_context, historical_qa)
-            
-            # Determine the appropriate response strategy based on available context
-            if document_context:
-                return await self._generate_document_based_answer(question, question_analysis, document_context, historical_qa)
-            elif historical_qa:
-                return await self._generate_historical_based_answer(question, question_analysis, document_context, historical_qa)
-            else:
-                return await self._generate_gpt_fallback_answer(question, question_analysis, document_context, historical_qa)
-            
-        except Exception as e:
-            print(f"❌ Error generating contextual answer: {str(e)}")
-            return await self._generate_gpt_fallback_answer(question, question_analysis, document_context, historical_qa)
-
     async def _generate_document_based_answer(
         self, 
         question: str,
@@ -592,118 +666,92 @@ Provide only the JSON response, no additional text."""
         """Generate answer primarily based on document context"""
         doc_context_text = self._format_document_context(document_context)
     
-        system_prompt = """You are an AI assistant specializing in document analysis. Your primary task is to answer questions based on the provided document context. Be precise, cite your sources, and stay focused on the document content."""
+        if not self.openai_configured:
+            return self._generate_demo_document_answer(question, document_context)
+    
+        system_prompt = """You are an AI assistant specializing in document analysis. Your primary task is to answer questions based EXCLUSIVELY on the provided document context. 
+
+IMPORTANT INSTRUCTIONS:
+1. Base your answer ONLY on the information provided in the document context
+2. Include specific references to source documents and page numbers
+3. If the documents don't contain enough information to fully answer the question, clearly state what information is missing
+4. Do not add information from your general knowledge that isn't in the documents
+5. Be comprehensive and detailed in your response"""
 
         user_prompt = f"""QUESTION: {question}
 
-DOCUMENT CONTEXT:
+DOCUMENT CONTEXT FROM UPLOADED PDFs:
 {doc_context_text}
 
-Please provide a comprehensive answer based primarily on the document context. Include specific references to the source documents and page numbers. If the documents don't fully address the question, clearly state what information is missing."""
+Please provide a comprehensive answer based EXCLUSIVELY on the document context above. Include specific references to the source documents and page numbers. If the documents don't fully address the question, clearly state what information is available and what is missing."""
 
-        import openai
-        response = openai.ChatCompletion.create(
-            model=self.chat_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=600,
-            temperature=0.3,  # Lower temperature for more focused responses
-            timeout=30
-        )
-    
-        answer = response['choices'][0]['message']['content'].strip()
+        try:
+            import openai
+            response = openai.ChatCompletion.create(
+                model=self.chat_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=800,
+                temperature=0.2,  # Low temperature for factual responses
+                timeout=30
+            )
+        
+            answer = response['choices'][0]['message']['content'].strip()
+        except Exception as e:
+            print(f"❌ Error generating document-based answer: {str(e)}")
+            return self._generate_demo_document_answer(question, document_context)
     
         return {
             'answer': answer,
-            'confidence': 0.9,
+            'confidence': 0.95,  # High confidence for document-based answers
             'primary_source': 'documents',
-            'source_documents': [doc['filename'] for doc in document_context]
+            'source_documents': list(set([doc['filename'] for doc in document_context]))
         }
-
-    async def _generate_historical_based_answer(
+    
+    def _generate_demo_document_answer(
         self, 
-        question: str,
-        question_analysis: Dict[str, Any],
-        document_context: List[Dict[str, Any]],
-        historical_qa: List[Dict[str, Any]]
+        question: str, 
+        document_context: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Generate answer primarily based on historical Q&A"""
-        qa_context_text = self._format_qa_context(historical_qa)
-    
-        system_prompt = """You are an AI assistant that builds upon previous Q&A interactions. Use the historical context to provide consistent and comprehensive answers while adapting to the current question."""
+        """Generate a demo answer showing document-based response"""
+        
+        source_info = []
+        for doc in document_context[:5]:  # Show top 5 sources
+            source_info.append(f"📄 {doc['filename']} (Page {doc.get('page_number', 'N/A')}) - Relevance: {doc['similarity']:.3f}")
+        
+        content_preview = []
+        for i, doc in enumerate(document_context[:3], 1):
+            preview = doc['content'][:200] + "..." if len(doc['content']) > 200 else doc['content']
+            content_preview.append(f"Source {i}: {preview}")
+        
+        demo_answer = f"""🎭 **Demo Response** (OpenAI not configured)
 
-        user_prompt = f"""QUESTION: {question}
+**Question:** {question}
 
-HISTORICAL Q&A CONTEXT:
-{qa_context_text}
+**ANSWER GENERATED FROM PDF DOCUMENTS:**
 
-Based on the similar previous questions and answers, provide a comprehensive response to the current question. Maintain consistency with previous answers while addressing any new aspects of the current question."""
+Based on the uploaded PDF documents, I found the following relevant information:
 
-        import openai
-        response = openai.ChatCompletion.create(
-            model=self.chat_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=600,
-            temperature=0.4,
-            timeout=30
-        )
-    
-        answer = response['choices'][0]['message']['content'].strip()
-    
+{chr(10).join(content_preview)}
+
+**Sources Found:**
+{chr(10).join(source_info)}
+
+**What the full system would provide:**
+With OpenAI configured, this system would analyze the {len(document_context)} relevant document chunks found and generate a comprehensive, well-sourced answer based exclusively on the PDF content.
+
+**PDF Search Results:**
+✅ {len(document_context)} relevant chunks found across {len(set([doc['filename'] for doc in document_context]))} documents
+✅ Multiple search strategies used (vector, keyword, entity, fuzzy)
+✅ Content prioritized from uploaded PDFs"""
+
         return {
-            'answer': answer,
-            'confidence': 0.85,
-            'primary_source': 'historical_qa',
-            'source_documents': []
-        }
-
-    async def _generate_hybrid_answer(
-        self, 
-        question: str,
-        question_analysis: Dict[str, Any],
-        document_context: List[Dict[str, Any]],
-        historical_qa: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """Generate answer using both document and historical context"""
-        doc_context_text = self._format_document_context(document_context)
-        qa_context_text = self._format_qa_context(historical_qa)
-    
-        system_prompt = """You are an intelligent AI assistant with access to both document content and historical Q&A data. Synthesize information from both sources to provide comprehensive, well-sourced answers."""
-
-        user_prompt = f"""QUESTION: {question}
-
-DOCUMENT CONTEXT:
-{doc_context_text}
-
-HISTORICAL Q&A CONTEXT:
-{qa_context_text}
-
-Please provide a comprehensive answer that synthesizes information from both the document context and historical Q&A. Clearly distinguish between information from documents versus previous Q&A sessions."""
-
-        import openai
-        response = openai.ChatCompletion.create(
-            model=self.chat_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=700,
-            temperature=0.5,
-            timeout=30
-        )
-    
-        answer = response['choices'][0]['message']['content'].strip()
-    
-        return {
-            'answer': answer,
-            'confidence': 0.8,
-            'primary_source': 'hybrid',
-            'source_documents': [doc['filename'] for doc in document_context]
+            'answer': demo_answer,
+            'confidence': 0.95,
+            'primary_source': 'documents',
+            'source_documents': list(set([doc['filename'] for doc in document_context]))
         }
 
     async def _generate_gpt_fallback_answer(
@@ -714,36 +762,25 @@ Please provide a comprehensive answer that synthesizes information from both the
         historical_qa: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Generate answer using GPT-3.5 Turbo when document/historical context is insufficient
+        Generate answer using GPT-3.5 Turbo when no relevant content is found
         """
-        print("🤖 Falling back to GPT-3.5 Turbo for general knowledge response")
+        print("🤖 Generating GPT fallback response")
     
-        # Prepare context summary for transparency
-        context_summary = []
-        if document_context:
-            context_summary.append(f"Found {len(document_context)} potentially relevant document sections, but with low confidence.")
-        if historical_qa:
-            context_summary.append(f"Found {len(historical_qa)} similar previous questions, but not closely related.")
+        if not self.openai_configured:
+            return self._generate_demo_gpt_fallback(question)
     
-        context_note = " ".join(context_summary) if context_summary else "No relevant context found in uploaded documents or previous Q&A."
-    
-        system_prompt = f"""You are a knowledgeable AI assistant. The user has asked a question, but the available document context and historical Q&A data don't provide sufficient information to answer confidently.
-
-Context Status: {context_note}
+        system_prompt = """You are a knowledgeable AI assistant. The user has asked a question, but no relevant information was found in their uploaded PDF documents or historical Q&A database.
 
 Provide a helpful, accurate answer based on your general knowledge. Be clear that this response is generated from general AI knowledge rather than specific uploaded documents. If the question would benefit from specific documentation, suggest what type of documents might be helpful."""
 
         user_prompt = f"""QUESTION: {question}
 
-QUESTION ANALYSIS:
-- Intent: {question_analysis.get('intent', 'general_inquiry')}
-- Type: {question_analysis.get('question_type', 'factual')}
-- Complexity: {question_analysis.get('complexity', 'medium')}
+CONTEXT: No relevant information was found in the user's uploaded PDF documents or previous Q&A history.
 
 Please provide a comprehensive answer based on general knowledge. Since no specific document context is available, focus on providing accurate, helpful information while noting that more specific information might be available with relevant documentation."""
 
-        import openai
         try:
+            import openai
             response = openai.ChatCompletion.create(
                 model=self.chat_model,
                 messages=[
@@ -751,16 +788,16 @@ Please provide a comprehensive answer based on general knowledge. Since no speci
                     {"role": "user", "content": user_prompt}
                 ],
                 max_tokens=800,
-                temperature=0.7,  # Higher temperature for more creative general responses
+                temperature=0.7,
                 timeout=30
             )
         
             answer = response['choices'][0]['message']['content'].strip()
         except Exception as e:
-            return await self._handle_gpt_error_fallback(question, str(e))
+            return self._generate_demo_gpt_fallback(question)
     
         # Add a note about the source
-        answer_with_note = f"{answer}\n\n---\n*Note: This response is generated from general AI knowledge as no specific relevant information was found in your uploaded documents or previous Q&A history. For more specific information, consider uploading relevant documents.*"
+        answer_with_note = f"{answer}\n\n---\n*Note: This response is generated from general AI knowledge as no relevant information was found in your uploaded PDF documents or previous Q&A history. For more specific information, consider uploading relevant documents.*"
     
         return {
             'answer': answer_with_note,
@@ -768,88 +805,31 @@ Please provide a comprehensive answer based on general knowledge. Since no speci
             'primary_source': 'gpt_fallback',
             'source_documents': []
         }
-
-    def _generate_demo_answer_with_fallback(
-        self, 
-        question: str, 
-        question_analysis: Dict[str, Any],
-        document_context: List[Dict[str, Any]], 
-        historical_qa: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """Generate a demo answer with fallback logic demonstration"""
-        context_summary = []
     
-        if document_context:
-            context_summary.append(f"📄 Found {len(document_context)} document sections")
-            avg_similarity = sum(doc.get('similarity', 0) for doc in document_context) / len(document_context)
-            context_summary.append(f"   Average relevance: {avg_similarity:.2f}")
-    
-        if historical_qa:
-            context_summary.append(f"📚 Found {len(historical_qa)} similar Q&A pairs")
-            best_similarity = max(qa.get('similarity', 0) for qa in historical_qa)
-            context_summary.append(f"   Best match: {best_similarity:.2f}")
-    
-        # Simulate fallback decision
-        has_good_context = (
-            (document_context and any(doc.get('similarity', 0) >= 0.75 for doc in document_context)) or
-            (historical_qa and any(qa.get('similarity', 0) >= 0.85 for qa in historical_qa))
-        )
-    
-        if has_good_context:
-            approach = "Document/Historical Context"
-            confidence = 0.9
-        else:
-            approach = "GPT-3.5 Turbo Fallback"
-            confidence = 0.7
-    
+    def _generate_demo_gpt_fallback(self, question: str) -> Dict[str, Any]:
+        """Generate demo GPT fallback response"""
         demo_answer = f"""🎭 **Demo Response** (OpenAI not configured)
 
 **Question:** {question}
 
-**Context Analysis:**
-{chr(10).join(context_summary) if context_summary else "No relevant context found"}
+**GPT-3.5 Turbo Fallback Response:**
 
-**Selected Approach:** {approach}
-**Confidence:** {confidence}
+No relevant information was found in your uploaded PDF documents or historical Q&A database after exhaustive search.
 
-**What the full system would do:**
-{
-        "Use the high-quality document/historical context to generate a well-sourced answer with specific citations." 
-        if has_good_context 
-        else "Fall back to GPT-3.5 Turbo to provide a general knowledge response, clearly noting the lack of specific context."
-    }
+**Search Summary:**
+❌ PDF Documents: No relevant content found despite comprehensive search
+❌ Historical Q&A: No similar questions found
+✅ GPT Fallback: Activated
 
-**Enhanced RAG Features:**
-✅ Intelligent context assessment
-✅ Multi-strategy source evaluation  
-✅ Automatic GPT fallback when needed
-✅ Transparent source attribution
-✅ Confidence scoring"""
+**What the full system would provide:**
+With OpenAI configured, GPT-3.5 Turbo would provide a comprehensive answer based on general knowledge, while clearly noting that no specific information was found in your uploaded documents.
+
+**Recommendation:** Consider uploading documents that contain information relevant to your question for more specific answers."""
 
         return {
             'answer': demo_answer,
-            'confidence': confidence,
-            'primary_source': 'demo',
-            'source_documents': [doc['filename'] for doc in document_chunks] if document_context else []
-        }
-
-    async def _handle_gpt_error_fallback(self, question: str, error: str) -> Dict[str, Any]:
-        """Handle errors in GPT generation with a graceful fallback"""
-        fallback_answer = f"""I apologize, but I encountered an error while generating a response to your question: "{question}"
-
-Error details: {error}
-
-This appears to be a temporary issue. Please try asking your question again, or consider:
-1. Rephrasing your question
-2. Uploading relevant documents for more specific context
-3. Checking if the question can be broken down into smaller parts
-
-If the issue persists, please contact support."""
-
-        return {
-            'answer': fallback_answer,
-            'confidence': 0.3,
-            'primary_source': 'error_fallback',
+            'confidence': 0.7,
+            'primary_source': 'gpt_fallback',
             'source_documents': []
         }
     
@@ -860,92 +840,16 @@ If the issue persists, please contact support."""
         
         formatted_context = []
         for i, doc in enumerate(document_context, 1):
-            content_preview = doc['content'][:400] + "..." if len(doc['content']) > 400 else doc['content']
+            content_preview = doc['content'][:500] + "..." if len(doc['content']) > 500 else doc['content']
             formatted_context.append(
-                f"[Source {i}: {doc['filename']} - Page {doc.get('page_number', 'N/A')} - Relevance: {doc['similarity']:.2f}]\n{content_preview}"
+                f"[Source {i}: {doc['filename']} - Page {doc.get('page_number', 'N/A')} - Relevance: {doc['similarity']:.3f} - Method: {doc.get('search_method', 'unknown')}]\n{content_preview}"
             )
         
         return "\n\n".join(formatted_context)
-    
-    def _format_qa_context(self, historical_qa: List[Dict[str, Any]]) -> str:
-        """Format historical Q&A context for the prompt"""
-        if not historical_qa:
-            return "No relevant historical Q&A found."
-        
-        formatted_qa = []
-        for i, qa in enumerate(historical_qa, 1):
-            formatted_qa.append(
-                f"[Previous Q&A {i} - Similarity: {qa['similarity']:.2f}]\nQ: {qa['question_text']}\nA: {qa['answer_text'][:300]}..."
-            )
-        
-        return "\n\n".join(formatted_qa)
-    
-    def _generate_demo_answer(
-        self, 
-        question: str, 
-        question_analysis: Dict[str, Any],
-        document_context: List[Dict[str, Any]], 
-        historical_qa: List[Dict[str, Any]]
-    ) -> str:
-        """Generate a demo answer when OpenAI is not configured"""
-        context_summary = []
-        
-        if document_context:
-            context_summary.append(f"📄 Found {len(document_context)} relevant document sections")
-            for doc in document_context[:2]:
-                context_summary.append(f"  • {doc['filename']} (Page {doc.get('page_number', 'N/A')})")
-        
-        if historical_qa:
-            context_summary.append(f"📚 Found {len(historical_qa)} similar previous questions")
-        
-        return f"""🎭 **Demo Response** (OpenAI not configured)
 
-**Question:** {question}
-
-**Analysis:**
-- Intent: {question_analysis.get('intent', 'general_inquiry')}
-- Complexity: {question_analysis.get('complexity', 'medium')}
-- Key concepts: {', '.join(question_analysis.get('keywords', [])[:5])}
-
-**Available Context:**
-{chr(10).join(context_summary) if context_summary else "No specific context found"}
-
-**What the full system would provide:**
-With OpenAI configured, this system would analyze your question contextually and provide a comprehensive answer by:
-1. Understanding the intent and complexity of your question
-2. Searching through uploaded documents using semantic similarity
-3. Finding relevant historical Q&A pairs
-4. Generating a well-sourced, contextual response
-
-**Current Status:** Demo mode - showing enhanced RAG capabilities without AI costs."""
-    
-    def _generate_fallback_answer(
-        self, 
-        question: str, 
-        document_context: List[Dict[str, Any]], 
-        historical_qa: List[Dict[str, Any]]
-    ) -> str:
-        """Generate a fallback answer when AI generation fails"""
-        context_info = []
-        
-        if document_context:
-            context_info.append(f"Found {len(document_context)} relevant document sections:")
-            for doc in document_context[:3]:
-                context_info.append(f"• {doc['filename']} (Page {doc.get('page_number', 'N/A')}): {doc['content'][:200]}...")
-        
-        if historical_qa:
-            context_info.append(f"\nSimilar previous questions:")
-            for qa in historical_qa[:2]:
-                context_info.append(f"• Q: {qa['question_text'][:100]}...")
-                context_info.append(f"  A: {qa['answer_text'][:200]}...")
-        
-        return f"""I found relevant context for your question: "{question}"
-
-{chr(10).join(context_info)}
-
-However, I encountered an error generating a comprehensive response. The system has identified relevant information from your uploaded documents and previous Q&A history that would help answer your question."""
-
-print("✅ Enhanced RAG Service initialized with strict prioritization:")
-print("- PRIORITY 1: Document search (PDF content)")
-print("- PRIORITY 2: Historical Q&A (previous answers)")
-print("- PRIORITY 3: GPT fallback (general knowledge)")
+print("✅ Enhanced RAG Service initialized with EXHAUSTIVE PDF PRIORITIZATION:")
+print("- PRIORITY 1: Exhaustive PDF document search (5 strategies)")
+print("- PRIORITY 2: Historical Q&A database")
+print("- PRIORITY 3: GPT-3.5 Turbo fallback")
+print("- Document similarity threshold: 0.3 (very inclusive)")
+print("- Multiple search strategies: vector, keyword, entity, fuzzy, sampling")
