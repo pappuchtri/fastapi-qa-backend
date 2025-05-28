@@ -1,13 +1,11 @@
 import os
 import io
 import hashlib
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Dict, Any
 import PyPDF2
 import numpy as np
+from sqlalchemy import text
 from sqlalchemy.orm import Session
-from document_models import Document, DocumentChunk
-from document_schemas import DocumentCreate, DocumentChunkCreate
-import document_crud
 import asyncio
 
 class PDFService:
@@ -16,33 +14,50 @@ class PDFService:
         self.chunk_size = 1000  # Characters per chunk
         self.chunk_overlap = 200  # Overlap between chunks
         
-    async def process_pdf(self, db: Session, file_content: bytes, filename: str, original_filename: str) -> Document:
+    async def process_pdf(self, db: Session, file_content: bytes, filename: str, original_filename: str) -> Dict[str, Any]:
         """Process uploaded PDF file and extract text chunks"""
         try:
             print(f"📄 Processing PDF: {original_filename}")
             
-            # Create document record
+            # Create document record using raw SQL
             file_size = len(file_content)
-            document_data = DocumentCreate(
-                filename=filename,
-                original_filename=original_filename,
-                file_size=file_size,
-                content_type="application/pdf"
-            )
+            result = db.execute(text("""
+                INSERT INTO documents 
+                (filename, original_filename, file_size, content_type, processing_status)
+                VALUES (:filename, :original_filename, :file_size, :content_type, :status)
+                RETURNING id
+            """), {
+                "filename": filename,
+                "original_filename": original_filename,
+                "file_size": file_size,
+                "content_type": "application/pdf",
+                "status": "processing"
+            })
             
-            document = document_crud.create_document(db, document_data)
+            document_id = result.fetchone()[0]
+            db.commit()
             
             # Extract text from PDF
             text_content, total_pages = self._extract_text_from_pdf(file_content)
             
             if not text_content.strip():
                 # Update document with error
-                document_crud.update_document_status(
-                    db, document.id, 
-                    processing_status="failed",
-                    error_message="No text content found in PDF"
-                )
-                return document
+                db.execute(text("""
+                    UPDATE documents 
+                    SET processing_status = :status, error_message = :error, processed = false
+                    WHERE id = :id
+                """), {
+                    "status": "failed",
+                    "error": "No text content found in PDF",
+                    "id": document_id
+                })
+                db.commit()
+                
+                return {
+                    "document_id": document_id,
+                    "status": "failed",
+                    "error": "No text content found in PDF"
+                }
             
             # Create text chunks
             chunks = self._create_text_chunks(text_content, total_pages)
@@ -57,16 +72,24 @@ class PDFService:
                     embedding = await self.rag_service.generate_embedding(chunk_data['content'])
                     
                     # Create chunk record
-                    chunk_create = DocumentChunkCreate(
-                        document_id=document.id,
-                        chunk_index=chunk_data['index'],
-                        content=chunk_data['content'],
-                        page_number=chunk_data['page_number'],
-                        word_count=len(chunk_data['content'].split())
-                    )
+                    db.execute(text("""
+                        INSERT INTO document_chunks
+                        (document_id, chunk_index, content, page_number, word_count, chunk_embedding)
+                        VALUES (:doc_id, :index, :content, :page, :words, :embedding)
+                    """), {
+                        "doc_id": document_id,
+                        "index": chunk_data['index'],
+                        "content": chunk_data['content'],
+                        "page": chunk_data['page_number'],
+                        "words": len(chunk_data['content'].split()),
+                        "embedding": embedding.tolist() if isinstance(embedding, np.ndarray) else embedding
+                    })
                     
-                    chunk = document_crud.create_document_chunk(db, chunk_create, embedding)
                     chunk_count += 1
+                    
+                    # Commit every 5 chunks to avoid long transactions
+                    if chunk_count % 5 == 0:
+                        db.commit()
                     
                     # Add small delay to avoid rate limiting
                     if self.rag_service.openai_configured:
@@ -76,28 +99,53 @@ class PDFService:
                     print(f"⚠️ Error processing chunk {chunk_data['index']}: {str(e)}")
                     continue
             
+            # Final commit for any remaining chunks
+            db.commit()
+            
             # Update document status
-            document_crud.update_document_status(
-                db, document.id,
-                processing_status="completed",
-                processed=True,
-                total_pages=total_pages,
-                total_chunks=chunk_count
-            )
+            db.execute(text("""
+                UPDATE documents
+                SET processing_status = :status, processed = true, 
+                    total_pages = :pages, total_chunks = :chunks
+                WHERE id = :id
+            """), {
+                "status": "completed",
+                "pages": total_pages,
+                "chunks": chunk_count,
+                "id": document_id
+            })
+            db.commit()
             
             print(f"✅ PDF processing completed: {chunk_count} chunks created")
-            return document
+            
+            return {
+                "document_id": document_id,
+                "status": "completed",
+                "total_pages": total_pages,
+                "total_chunks": chunk_count
+            }
             
         except Exception as e:
             print(f"❌ Error processing PDF: {str(e)}")
-            # Update document with error status
-            if 'document' in locals():
-                document_crud.update_document_status(
-                    db, document.id,
-                    processing_status="failed",
-                    error_message=str(e)
-                )
-                return document
+            # Update document with error status if document was created
+            if 'document_id' in locals():
+                db.execute(text("""
+                    UPDATE documents
+                    SET processing_status = :status, error_message = :error, processed = false
+                    WHERE id = :id
+                """), {
+                    "status": "failed",
+                    "error": str(e),
+                    "id": document_id
+                })
+                db.commit()
+                
+                return {
+                    "document_id": document_id,
+                    "status": "failed",
+                    "error": str(e)
+                }
+            
             raise e
     
     def _extract_text_from_pdf(self, file_content: bytes) -> Tuple[str, int]:
@@ -200,5 +248,5 @@ class PDFService:
 print("✅ PDF Service initialized:")
 print("- Chunk size: 1000 characters")
 print("- Chunk overlap: 200 characters")
-print("- Supports PyPDF2 text extraction")
-print("- Automatic embedding generation")
+print("- Using PyPDF2 for text extraction")
+print("- Using direct SQL for database operations")
