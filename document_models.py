@@ -29,7 +29,7 @@ class Document(Base):
     error_message = Column(Text, nullable=True)
     total_pages = Column(Integer, nullable=True)
     total_chunks = Column(Integer, default=0)
-    metadata = Column(JSONB, default={})
+    doc_metadata = Column(JSONB, default={})  # Renamed from 'metadata'
 
     # Relationship to document chunks
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
@@ -45,7 +45,7 @@ class DocumentChunk(Base):
     chunk_embedding = Column(VECTOR(1536), nullable=True)  # OpenAI ada-002 embedding dimension
     word_count = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    metadata = Column(JSONB, default={})
+    chunk_metadata = Column(JSONB, default={})  # Renamed from 'metadata'
 
     # Relationship to document
     document = relationship("Document", back_populates="chunks")
