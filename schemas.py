@@ -1,96 +1,117 @@
 from pydantic import BaseModel, Field
-from datetime import datetime
 from typing import Optional, List
+from datetime import datetime
 
-class QuestionRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=1000, description="The question to ask")
+# Question schemas
+class QuestionBase(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000, description="The question text")
+
+class QuestionCreate(QuestionBase):
+    pass
+
+class QuestionRequest(QuestionBase):
+    pass
+
+class QuestionResponse(QuestionBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
     
     class Config:
-        schema_extra = {
-            "example": {
-                "question": "What is the capital of France?"
-            }
-        }
+        from_attributes = True
 
-class AnswerResponse(BaseModel):
-    answer: str = Field(..., description="The generated or retrieved answer")
-    question_id: int = Field(..., description="ID of the question")
-    answer_id: int = Field(..., description="ID of the answer")
-    similarity_score: Optional[float] = Field(default=0.0, description="Similarity score with existing questions")
-    is_cached: bool = Field(default=False, description="Whether the answer was retrieved from cache")
+# Answer schemas
+class AnswerBase(BaseModel):
+    text: str = Field(..., min_length=1, description="The answer text")
+    confidence_score: Optional[float] = Field(0.95, ge=0.0, le=1.0, description="Confidence score")
+
+class AnswerCreate(AnswerBase):
+    question_id: int
+
+class AnswerResponse(AnswerBase):
+    id: int
+    question_id: int
+    created_at: datetime
+    updated_at: datetime
     
     class Config:
-        schema_extra = {
-            "example": {
-                "answer": "Paris is the capital of France.",
-                "question_id": 1,
-                "answer_id": 1,
-                "similarity_score": 0.95,
-                "is_cached": True
-            }
-        }
+        from_attributes = True
+
+# Q&A Request/Response schemas
+class QuestionAnswerRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000, description="The question to ask")
+
+class QuestionAnswerResponse(BaseModel):
+    answer: str
+    question_id: int
+    answer_id: int
+    similarity_score: float = Field(..., ge=0.0, le=1.0)
+    is_cached: bool = Field(..., description="Whether the answer was retrieved from cache")
+    source_documents: Optional[List[str]] = Field(None, description="Source documents used for the answer")
+
+# Health check schemas
+class HealthResponse(BaseModel):
+    status: str = "healthy"
+    message: str = "API is running"
+    timestamp: datetime
+    database_connected: bool
+    openai_configured: bool
+
+class AuthHealthResponse(BaseModel):
+    status: str = "authenticated"
+    message: str = "API key is valid"
+    timestamp: datetime
+
+# Document schemas
+class DocumentBase(BaseModel):
+    filename: str
+    original_filename: str
+    file_size: int
+    content_type: str = "application/pdf"
+
+class DocumentCreate(DocumentBase):
+    pass
+
+class DocumentResponse(DocumentBase):
+    id: int
+    upload_date: datetime
+    processed: bool
+    processing_status: str
+    error_message: Optional[str] = None
+    total_pages: Optional[int] = None
+    total_chunks: int = 0
+    
+    class Config:
+        from_attributes = True
+
+class DocumentListResponse(BaseModel):
+    documents: List[DocumentResponse]
+    total: int
+    page: int
+    per_page: int
+
+class DocumentUploadResponse(BaseModel):
+    message: str
+    document_id: int
+    filename: str
+    file_size: int
+    processing_status: str
+
+class DocumentSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, description="Search query")
+    limit: int = Field(5, ge=1, le=20, description="Maximum number of results")
+    document_ids: Optional[List[int]] = Field(None, description="Specific document IDs to search in")
+
+class DocumentSearchResponse(BaseModel):
+    results: List[dict]
+    query: str
+    total_results: int
+
+# Legacy schemas for backward compatibility
+class ApiKeyResponse(BaseModel):
+    message: str
+    valid: bool
 
 class AuthErrorResponse(BaseModel):
-    detail: str = Field(..., description="Error message")
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "detail": "Invalid API key"
-            }
-        }
-
-class ApiKeyResponse(BaseModel):
-    api_key: str = Field(..., description="The generated API key")
-    message: str = Field(..., description="Success message")
-    masked_key: str = Field(..., description="Masked version of the API key")
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "api_key": "qa-abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx",
-                "message": "API key generated successfully",
-                "masked_key": "qa-abcd1...3456"
-            }
-        }
-
-class QuestionSchema(BaseModel):
-    id: int
-    text: str
-    created_at: datetime
-    updated_at: datetime
-    
-    class Config:
-        from_attributes = True
-
-class AnswerSchema(BaseModel):
-    id: int
-    question_id: int
-    text: str
-    confidence_score: Optional[float] = None
-    created_at: datetime
-    updated_at: datetime
-    
-    class Config:
-        from_attributes = True
-
-class EmbeddingSchema(BaseModel):
-    id: int
-    question_id: int
-    vector: List[float]
-    model_name: str
-    created_at: datetime
-    
-    class Config:
-        from_attributes = True
-
-class RAGStatsResponse(BaseModel):
-    total_embeddings: int
-    total_questions: int
-    total_answers: int
-    embedding_coverage: float
-
-print("Updated Pydantic schemas with authentication models:")
-print("- Added AuthErrorResponse for authentication errors")
-print("- Added ApiKeyResponse for API key management")
-print("- Updated existing schemas with authentication context")
+    detail: str
+    error_code: str = "AUTH_ERROR"
