@@ -1,41 +1,44 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-import os
-from dotenv import load_dotenv
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
+from sqlalchemy.dialects.postgresql import VECTOR, ARRAY, JSONB
+from sqlalchemy.orm import relationship
+from database import Base
+from datetime import datetime
 
-# Load environment variables
-load_dotenv()
+class Document(Base):
+    __tablename__ = "documents"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String(255), nullable=False, index=True)
+    original_filename = Column(String(255), nullable=False)
+    file_size = Column(Integer, nullable=False)
+    content_type = Column(String(100), default='application/pdf')
+    upload_date = Column(DateTime, default=datetime.utcnow, index=True)
+    processed = Column(Boolean, default=False, index=True)
+    processing_status = Column(String(50), default='pending')
+    error_message = Column(Text, nullable=True)
+    total_pages = Column(Integer, nullable=True)
+    total_chunks = Column(Integer, default=0)
+    metadata = Column(JSONB, default={})
+    
+    # Relationships
+    chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
 
-# Database URL from environment variable
-DATABASE_URL = os.getenv("DATABASE_URL")
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    page_number = Column(Integer, nullable=True, index=True)
+    chunk_embedding = Column(VECTOR(1536), nullable=True)  # OpenAI ada-002 embedding dimension
+    word_count = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    metadata = Column(JSONB, default={})
+    
+    # Relationships
+    document = relationship("Document", back_populates="chunks")
 
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set")
-
-# Create SQLAlchemy engine
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=300,
-    echo=False  # Set to True for SQL debugging
-)
-
-# Create SessionLocal class
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Create Base class
-Base = declarative_base()
-
-# Dependency to get database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-print("✅ Database configuration loaded:")
-print(f"- Database URL configured: {'Yes' if DATABASE_URL else 'No'}")
-print("- Connection pooling enabled")
-print("- Session management configured")
+print("✅ Document models created:")
+print("- Document: stores PDF metadata and processing status")
+print("- DocumentChunk: stores extracted text chunks with embeddings")
