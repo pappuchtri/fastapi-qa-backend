@@ -25,11 +25,14 @@ class RAGService:
             self.openai_configured = False
         
         self.embedding_dimension = 1536  # text-embedding-ada-002 dimension
-        self.similarity_threshold = 0.7  # Lower threshold for better document matching
+        self.similarity_threshold = 0.85  # Higher threshold for Q&A cache (more precise matching)
+        self.document_similarity_threshold = 0.5  # Lower threshold for document search (more inclusive)
         
         # Always use GPT-3.5-turbo (available to all accounts, cost-effective)
         self.chat_model = "gpt-3.5-turbo"
         print(f"🤖 Using chat model: {self.chat_model}")
+        print(f"🎯 Q&A cache similarity threshold: {self.similarity_threshold}")
+        print(f"📄 Document search similarity threshold: {self.document_similarity_threshold}")
         
     async def generate_embedding(self, text: str) -> np.ndarray:
         """Generate embedding for given text using OpenAI text-embedding-ada-002"""
