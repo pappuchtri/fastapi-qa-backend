@@ -17,7 +17,8 @@ load_dotenv()
 
 # Import our modules
 from database import SessionLocal, engine, get_db, Base
-from models import Question, Answer, Embedding, Document
+from models import Question, Answer, Embedding
+from document_models import Document, DocumentChunk
 from schemas import (
     QuestionAnswerRequest, 
     QuestionAnswerResponse, 
