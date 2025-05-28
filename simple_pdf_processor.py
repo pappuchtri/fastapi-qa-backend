@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from document_models import Document, DocumentChunk
 from rag_service import RAGService
 import asyncio
+import numpy as np
 
 class SimplePDFProcessor:
     def __init__(self, rag_service: RAGService):
