@@ -141,6 +141,87 @@ class RAGService:
             print(f"❌ Error in similarity search: {str(e)}")
             return None, 0.0
     
+    async def search_document_chunks(
+        self, 
+        db: Session, 
+        query_embedding: np.ndarray,
+        limit: int = 5
+    ) -> List[dict]:
+        """
+        Search for relevant document chunks using vector similarity
+        """
+        try:
+            print("🔍 Searching document chunks using vector similarity...")
+            
+            # Import here to avoid circular imports
+            from document_models import DocumentChunk, Document
+            
+            # Get all document chunks with embeddings
+            chunks = db.query(DocumentChunk).join(Document).filter(
+                DocumentChunk.chunk_embedding.isnot(None),
+                Document.processed == True
+            ).all()
+            
+            if not chunks:
+                print("📭 No document chunks with embeddings found")
+                return []
+            
+            print(f"📊 Found {len(chunks)} document chunks to search")
+            
+            # Calculate similarities
+            similarities = []
+            for chunk in chunks:
+                try:
+                    if chunk.chunk_embedding:
+                        chunk_vector = np.array(chunk.chunk_embedding)
+                        
+                        # Ensure vectors have same dimension
+                        if len(chunk_vector) != len(query_embedding):
+                            continue
+                        
+                        similarity = np.dot(query_embedding, chunk_vector) / (
+                            np.linalg.norm(query_embedding) * np.linalg.norm(chunk_vector)
+                        )
+                        
+                        similarities.append({
+                            "chunk": chunk,
+                            "similarity": float(similarity),
+                            "chunk_id": chunk.id,
+                            "document_id": chunk.document_id,
+                            "content": chunk.content,
+                            "page_number": chunk.page_number,
+                            "filename": chunk.document.original_filename if chunk.document else "Unknown"
+                        })
+                except Exception as e:
+                    print(f"⚠️ Error processing chunk {chunk.id}: {str(e)}")
+                    continue
+            
+            # Sort by similarity and return top results
+            similarities.sort(key=lambda x: x["similarity"], reverse=True)
+            
+            # Filter by minimum similarity threshold
+            min_similarity = 0.7  # Adjust this threshold as needed
+            relevant_chunks = [
+                {
+                    "chunk_id": item["chunk_id"],
+                    "document_id": item["document_id"],
+                    "content": item["content"],
+                    "page_number": item["page_number"],
+                    "filename": item["filename"],
+                    "similarity": item["similarity"]
+                }
+                for item in similarities 
+                if item["similarity"] >= min_similarity
+            ][:limit]
+            
+            print(f"🎯 Found {len(relevant_chunks)} relevant chunks (similarity >= {min_similarity})")
+            
+            return relevant_chunks
+            
+        except Exception as e:
+            print(f"❌ Error in document chunk search: {str(e)}")
+            return []
+    
     async def generate_answer(self, question: str) -> str:
         """Generate answer using OpenAI GPT-3.5-turbo"""
         if not self.openai_configured:
