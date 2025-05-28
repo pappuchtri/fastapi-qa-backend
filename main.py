@@ -1,51 +1,67 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Header, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-import uvicorn
-from datetime import datetime
+from typing import List, Optional
 import os
+import uuid
+from datetime import datetime
+import uvicorn
 from dotenv import load_dotenv
 import asyncio
-from typing import Optional
 import logging
-from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 # Load environment variables
 load_dotenv()
 
-from database import SessionLocal, engine, Base
+# Import our modules
+from database import SessionLocal, engine, get_db, Base
 from models import Question, Answer, Embedding
-from schemas import QuestionRequest, AnswerResponse, ApiKeyResponse, AuthErrorResponse
+from document_models import Document, DocumentChunk
+from schemas import (
+    QuestionAnswerRequest, 
+    QuestionAnswerResponse, 
+    HealthResponse, 
+    AuthHealthResponse,
+    QuestionResponse,
+    AnswerResponse
+)
+from document_schemas import (
+    DocumentResponse,
+    DocumentListResponse,
+    DocumentUploadResponse,
+    DocumentSearchRequest,
+    DocumentSearchResponse
+)
 from rag_service import RAGService
-from auth import verify_api_key, check_rate_limit, auth_manager
+from pdf_service import PDFService
+import crud
+import document_crud
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize RAG service
+# Initialize services
 rag_service = RAGService()
+pdf_service = PDFService(rag_service)
+
+# Create database tables
+Base.metadata.create_all(bind=engine)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager (replaces deprecated on_startup)"""
+    """Application lifespan manager"""
     # Startup
-    logger.info("🚀 Starting Q&A API with RAG...")
-    
-    # Create database tables safely
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("✅ Database tables created successfully")
-    except Exception as e:
-        logger.error(f"❌ Error creating database tables: {str(e)}")
+    logger.info("🚀 Starting PDF RAG Q&A API...")
     
     # Check DATABASE_URL
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         logger.info(f"📊 Database URL configured: {database_url[:30]}...")
         try:
-            # Test database connection with proper text() wrapper
             db = SessionLocal()
             result = db.execute(text("SELECT 1"))
             result.fetchone()
@@ -53,7 +69,6 @@ async def lifespan(app: FastAPI):
             logger.info("✅ Database connection successful!")
         except Exception as e:
             logger.error(f"❌ Database connection failed: {str(e)}")
-            logger.info("⚠️ App will continue - database errors handled at runtime")
     else:
         logger.error("❌ DATABASE_URL not configured!")
     
@@ -63,343 +78,387 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("🎭 Running in demo mode (no OpenAI key)")
     
-    # Check auth
-    logger.info(f"🔐 Authentication: {len(auth_manager.api_keys)} API keys loaded")
-    
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down Q&A API...")
+    logger.info("🛑 Shutting down PDF RAG Q&A API...")
 
+# Initialize FastAPI app
 app = FastAPI(
-    title="Q&A API with RAG and Neon Database",
-    description="A FastAPI backend with Retrieval-Augmented Generation using OpenAI and Neon PostgreSQL",
-    version="3.0.0",
+    title="PDF RAG Q&A API",
+    description="A FastAPI backend for PDF document processing and Q&A using RAG",
+    version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
 )
 
-# Add CORS middleware with permissive settings for development
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific domains
+    allow_origins=["*"],  # In production, replace with specific origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Dependency to get database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Security
+security = HTTPBearer()
 
-@app.get("/")
-def read_root():
-    return {
-        "message": "🎯 Q&A API with RAG and Neon Database", 
-        "status": "running", 
-        "features": [
-            "🤖 OpenAI Integration", 
-            "🔍 Vector Similarity Search", 
-            "🔐 API Key Authentication", 
-            "🗄️ Neon PostgreSQL"
-        ],
-        "version": "3.0.0",
-        "database": "Neon PostgreSQL",
-        "cors_enabled": True,
-        "docs": "/docs",
-        "health": "/health"
-    }
+# API Keys for development/demo
+VALID_API_KEYS = {
+    "dev-api-key-123",
+    "test-api-key-456", 
+    "demo-key-789",
+    "qa-development-key",
+    "master-dev-key"
+}
 
-@app.get("/health")
-def health_check():
-    """Health check endpoint for Render and monitoring"""
-    try:
-        # Test database connection with proper text() wrapper
-        db = SessionLocal()
-        result = db.execute(text("SELECT 1"))
-        result.fetchone()
-        db.close()
-        db_status = "connected"
-    except Exception as e:
-        logger.error(f"Database health check failed: {e}")
-        db_status = f"disconnected: {str(e)[:100]}"
+def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Verify API key from Authorization header"""
+    api_key = credentials.credentials
     
-    return {
-        "status": "healthy", 
-        "message": "API is running", 
-        "database": db_status,
-        "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
-        "timestamp": datetime.utcnow().isoformat(),
-        "version": "3.0.0"
-    }
-
-@app.get("/auth/health")
-def authenticated_health_check(api_key: str = Depends(verify_api_key)):
-    """Health check that requires authentication"""
-    try:
-        # Test database connection
-        db = SessionLocal()
-        result = db.execute(text("SELECT 1"))
-        result.fetchone()
-        db.close()
-        db_status = "connected"
-    except Exception as e:
-        db_status = f"error: {str(e)[:50]}"
+    if api_key not in VALID_API_KEYS:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
-    return {
-        "status": "healthy", 
-        "message": "API is running with authentication", 
-        "authenticated": True,
-        "api_key": f"{api_key[:8]}...{api_key[-4:]}",
-        "database": db_status,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return api_key
 
-@app.get("/debug/info")
-def debug_info():
-    """Debug endpoint to check configuration"""
-    try:
-        # Test database connection
-        db = SessionLocal()
-        result = db.execute(text("SELECT 1"))
-        result.fetchone()
-        db.close()
-        db_test = "✅ Connected"
-    except Exception as e:
-        db_test = f"❌ Error: {str(e)[:100]}"
-    
+@app.get("/", response_model=dict)
+async def root():
+    """Root endpoint"""
     return {
-        "environment": {
-            "database_configured": bool(os.getenv("DATABASE_URL")),
-            "database_test": db_test,
-            "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
-            "port": os.getenv("PORT", "8000"),
-            "render_environment": bool(os.getenv("RENDER")),
-        },
-        "api_keys": {
-            "total_keys": len(auth_manager.api_keys),
-            "development_keys_available": [
-                "dev-api-key-123",
-                "test-api-key-456", 
-                "demo-key-789",
-                "qa-development-key",
-                "master-dev-key"
-            ]
-        },
-        "features": {
-            "cors_enabled": True,
-            "docs_available": True,
-            "health_checks": True,
-            "rate_limiting": True
+        "message": "PDF RAG Q&A API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "auth_health": "/auth/health",
+            "ask": "/ask",
+            "questions": "/questions",
+            "upload": "/documents/upload",
+            "documents": "/documents",
+            "search": "/documents/search"
         }
     }
 
-@app.get("/test")
-def test_endpoint():
-    """Simple test endpoint to verify API connectivity"""
-    return {
-        "message": "✅ API is working perfectly!",
-        "timestamp": datetime.utcnow().isoformat(),
-        "status": "success",
-        "database": "Neon PostgreSQL",
-        "deployment": "Render"
-    }
-
-@app.post("/ask", response_model=AnswerResponse)
-async def ask_question(
-    request: QuestionRequest, 
-    db: Session = Depends(get_db),
-    api_key: str = Depends(check_rate_limit)
-):
-    """
-    🤖 Process a question using Retrieval-Augmented Generation (RAG).
-    Requires valid API key in Authorization header: Bearer <api_key>
-    """
+@app.get("/health", response_model=HealthResponse)
+async def health_check(db: Session = Depends(get_db)):
+    """Health check endpoint"""
     try:
-        logger.info(f"📝 Processing question: {request.question[:50]}...")
+        db.execute(text("SELECT 1"))
+        database_connected = True
+    except Exception:
+        database_connected = False
+    
+    return HealthResponse(
+        status="healthy",
+        message="API is running",
+        timestamp=datetime.utcnow(),
+        database_connected=database_connected,
+        openai_configured=rag_service.openai_configured
+    )
+
+@app.post("/ask", response_model=QuestionAnswerResponse)
+async def ask_question(
+    request: QuestionAnswerRequest,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Ask a question and get an AI-generated answer using RAG with document context"""
+    try:
+        question_text = request.question.strip()
         
-        # Check if OpenAI is configured
-        if not os.getenv("OPENAI_API_KEY"):
-            logger.info("🎭 Running in demo mode (no OpenAI key)")
-            
-            # Store the question in the database
-            db_question = Question(
-                text=request.question,
-                created_at=datetime.utcnow()
-            )
-            db.add(db_question)
-            db.commit()
-            db.refresh(db_question)
-            
-            # Create a demo answer
-            demo_answer = f"""🎭 **Demo Response from Render Deployment**
-
-Your question: "{request.question}"
-
-This is a demonstration of the Q&A system running successfully on Render! 
-
-**System Status:**
-✅ **FastAPI Backend**: Running on Render.com
-✅ **Database**: Connected to Neon PostgreSQL  
-✅ **Authentication**: API key verified
-✅ **Storage**: Question saved to database
-
-**In full mode with OpenAI API key configured, this system would:**
-
-🔍 **Step 1**: Generate embeddings for your question using OpenAI's text-embedding-ada-002
-🔎 **Step 2**: Search for similar questions in the vector database  
-🧠 **Step 3**: Either return a cached answer or generate a new one using GPT-4
-💾 **Step 4**: Store the question, answer, and embeddings for future reference
-
-**To enable AI responses:** Add your OPENAI_API_KEY to the Render environment variables.
-
-**Deployment Info:**
-- Platform: Render.com (Free Tier)
-- Database: Neon PostgreSQL
-- Question ID: {db_question.id}
-- Timestamp: {datetime.utcnow().isoformat()}"""
-            
-            # Store the answer
-            db_answer = Answer(
-                question_id=db_question.id,
-                text=demo_answer,
-                confidence_score=0.5,
-                created_at=datetime.utcnow()
-            )
-            db.add(db_answer)
-            db.commit()
-            db.refresh(db_answer)
-            
-            logger.info(f"✅ Demo response generated for question ID: {db_question.id}")
-            
-            return AnswerResponse(
-                answer=demo_answer,
-                question_id=db_question.id,
-                answer_id=db_answer.id,
-                similarity_score=0.0,
-                is_cached=False
+        if not question_text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Question cannot be empty"
             )
         
-        # Full RAG logic when OpenAI is configured
-        logger.info("🤖 Running in full AI mode")
-        question_embedding = await rag_service.generate_embedding(request.question)
+        print(f"🔍 Processing question: {question_text[:50]}...")
         
+        # Generate embedding for the question
+        query_embedding = await rag_service.generate_embedding(question_text)
+        
+        # Search for similar questions first
         similar_question, similarity_score = await rag_service.find_similar_question(
-            db, question_embedding
+            db, query_embedding
         )
         
-        if similar_question and similarity_score > 0.8:
-            existing_answer = db.query(Answer).filter(
-                Answer.question_id == similar_question.id
-            ).first()
+        # Search for relevant document chunks
+        relevant_chunks = document_crud.search_similar_chunks(
+            db, query_embedding, limit=3
+        )
+        
+        # Determine if we should use cached answer or generate new one
+        is_cached = False
+        answer_text = ""
+        source_documents = []
+        
+        if similar_question and similarity_score >= rag_service.similarity_threshold:
+            # Use cached answer from similar question
+            print(f"✅ Found similar question (similarity: {similarity_score:.3f})")
+            latest_answer = crud.get_answers_for_question(db, similar_question.id)
+            if latest_answer:
+                answer_text = latest_answer[0].text
+                is_cached = True
+                question_id = similar_question.id
+                answer_id = latest_answer[0].id
+                print("📋 Using cached answer")
+        
+        if not is_cached:
+            # Generate new answer with document context
+            print("🧠 Generating new answer with document context...")
             
-            logger.info(f"🔍 Found similar question with {similarity_score:.3f} similarity")
+            # Prepare context from relevant chunks
+            context = ""
+            if relevant_chunks:
+                print(f"📄 Found {len(relevant_chunks)} relevant document chunks")
+                context_parts = []
+                for chunk in relevant_chunks:
+                    doc = document_crud.get_document(db, chunk.document_id)
+                    if doc:
+                        context_parts.append(f"From {doc.original_filename} (Page {chunk.page_number or 'N/A'}):\n{chunk.content}")
+                        source_documents.append(doc.original_filename)
+                
+                context = "\n\n".join(context_parts)
             
-            return AnswerResponse(
-                answer=existing_answer.text,
-                question_id=similar_question.id,
-                answer_id=existing_answer.id,
-                similarity_score=similarity_score,
-                is_cached=True
-            )
-        else:
-            generated_answer = await rag_service.generate_answer(request.question)
-            
-            db_question = Question(
-                text=request.question,
-                created_at=datetime.utcnow()
-            )
-            db.add(db_question)
-            db.commit()
-            db.refresh(db_question)
-            
-            db_answer = Answer(
-                question_id=db_question.id,
-                text=generated_answer,
-                confidence_score=0.95,
-                created_at=datetime.utcnow()
-            )
-            db.add(db_answer)
-            db.commit()
-            db.refresh(db_answer)
-            
-            # Store embedding for future similarity searches
-            db_embedding = Embedding(
-                question_id=db_question.id,
-                vector=question_embedding.tolist(),
-                model_name="text-embedding-ada-002",
-                created_at=datetime.utcnow()
-            )
-            db.add(db_embedding)
-            db.commit()
-            
-            logger.info(f"🧠 Generated new AI answer for question ID: {db_question.id}")
-            
-            return AnswerResponse(
-                answer=generated_answer,
-                question_id=db_question.id,
-                answer_id=db_answer.id,
-                similarity_score=0.0,
-                is_cached=False
-            )
-            
-    except Exception as e:
-        logger.error(f"❌ Error processing question: {str(e)}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
+            # Generate answer with context
+            if context:
+                enhanced_question = f"""Context from uploaded documents:
+{context}
 
-@app.get("/questions")
-def get_questions(
-    skip: int = 0, 
-    limit: int = 100, 
+Question: {question_text}
+
+Please answer the question based on the provided context. If the context doesn't contain relevant information, please say so and provide a general answer."""
+            else:
+                enhanced_question = question_text
+            
+            answer_text = await rag_service.generate_answer(enhanced_question)
+            
+            # Store new question and answer
+            new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
+            question_id = new_question.id
+            
+            # Store embedding
+            crud.create_embedding(db, question_id, query_embedding)
+            
+            # Store answer
+            new_answer = crud.create_answer(
+                db, 
+                crud.AnswerCreate(
+                    question_id=question_id,
+                    text=answer_text,
+                    confidence_score=0.95
+                )
+            )
+            answer_id = new_answer.id
+            print("💾 Stored new question and answer")
+        
+        return QuestionAnswerResponse(
+            answer=answer_text,
+            question_id=question_id,
+            answer_id=answer_id,
+            similarity_score=similarity_score,
+            is_cached=is_cached,
+            source_documents=list(set(source_documents))  # Remove duplicates
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error processing question: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing question: {str(e)}"
+        )
+
+# Document Management Endpoints
+
+@app.post("/documents/upload", response_model=DocumentUploadResponse)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """📋 Get all questions with pagination - requires authentication"""
+    """Upload and process a PDF document"""
     try:
-        questions = db.query(Question).offset(skip).limit(limit).all()
-        total = db.query(Question).count()
-        return {
-            "questions": questions,
-            "total": total,
-            "skip": skip,
-            "limit": limit
-        }
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are supported"
+            )
+        
+        # Read file content
+        file_content = await file.read()
+        
+        if len(file_content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Empty file uploaded"
+            )
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        
+        print(f"📤 Uploading document: {file.filename} ({len(file_content)} bytes)")
+        
+        # Process PDF in background
+        document = await pdf_service.process_pdf(
+            db, file_content, unique_filename, file.filename
+        )
+        
+        return DocumentUploadResponse(
+            message="Document uploaded and processed successfully",
+            document_id=document.id,
+            filename=document.original_filename,
+            file_size=document.file_size,
+            processing_status=document.processing_status
+        )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        print(f"❌ Error uploading document: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading document: {str(e)}"
+        )
+
+@app.get("/documents", response_model=DocumentListResponse)
+async def list_documents(
+    page: int = 1,
+    per_page: int = 10,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """List all uploaded documents"""
+    skip = (page - 1) * per_page
+    documents = document_crud.get_documents(db, skip=skip, limit=per_page)
+    total = document_crud.get_document_count(db)
+    
+    return DocumentListResponse(
+        documents=documents,
+        total=total,
+        page=page,
+        per_page=per_page
+    )
+
+@app.get("/documents/{document_id}", response_model=DocumentResponse)
+async def get_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get document details"""
+    document = document_crud.get_document(db, document_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    return document
+
+@app.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Delete a document and all its chunks"""
+    success = document_crud.delete_document(db, document_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    return {"message": "Document deleted successfully"}
+
+@app.post("/documents/search", response_model=DocumentSearchResponse)
+async def search_documents(
+    request: DocumentSearchRequest,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Search for relevant document chunks"""
+    try:
+        # Generate embedding for search query
+        query_embedding = await rag_service.generate_embedding(request.query)
+        
+        # Search for similar chunks
+        chunks = document_crud.search_similar_chunks(
+            db, query_embedding, 
+            limit=request.limit,
+            document_ids=request.document_ids
+        )
+        
+        # Format results
+        results = []
+        for chunk in chunks:
+            document = document_crud.get_document(db, chunk.document_id)
+            if document:
+                # Calculate similarity score
+                chunk_vector = np.array(chunk.chunk_embedding) if chunk.chunk_embedding else None
+                similarity_score = 0.0
+                if chunk_vector is not None:
+                    similarity_score = float(np.dot(query_embedding, chunk_vector) / (
+                        np.linalg.norm(query_embedding) * np.linalg.norm(chunk_vector)
+                    ))
+                
+                results.append({
+                    "chunk_id": chunk.id,
+                    "document_id": document.id,
+                    "document_filename": document.original_filename,
+                    "content": chunk.content,
+                    "page_number": chunk.page_number,
+                    "similarity_score": similarity_score
+                })
+        
+        return DocumentSearchResponse(
+            results=results,
+            query=request.query,
+            total_results=len(results)
+        )
+        
+    except Exception as e:
+        print(f"❌ Error searching documents: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error searching documents: {str(e)}"
+        )
 
 @app.get("/stats")
-def get_stats(
+async def get_stats(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """📊 Get system statistics - requires authentication"""
-    try:
-        total_embeddings = db.query(Embedding).count()
-        total_questions = db.query(Question).count()
-        total_answers = db.query(Answer).count()
-        
-        return {
-            "database_stats": {
-                "total_embeddings": total_embeddings,
-                "total_questions": total_questions,
-                "total_answers": total_answers,
-                "embedding_coverage": total_embeddings / max(total_questions, 1)
-            },
-            "system_info": {
-                "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
-                "database_connected": True,
-                "version": "3.0.0"
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    """Get API statistics"""
+    question_count = crud.get_question_count(db)
+    answer_count = crud.get_answer_count(db)
+    document_count = document_crud.get_document_count(db)
+    chunk_count = document_crud.get_chunk_count(db)
+    
+    return {
+        "questions": question_count,
+        "answers": answer_count,
+        "documents": document_count,
+        "chunks": chunk_count,
+        "embeddings": len(crud.get_all_embeddings(db)),
+        "openai_configured": rag_service.openai_configured,
+        "similarity_threshold": rag_service.similarity_threshold
+    }
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True
+    )
