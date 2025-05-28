@@ -1,12 +1,13 @@
-from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Header, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import os
 import uuid
 from datetime import datetime
+import numpy as np
 import uvicorn
 from dotenv import load_dotenv
 import asyncio
@@ -19,7 +20,6 @@ load_dotenv()
 # Import our modules
 from database import SessionLocal, engine, get_db, Base
 from models import Question, Answer, Embedding
-from document_models import Document, DocumentChunk
 from schemas import (
     QuestionAnswerRequest, 
     QuestionAnswerResponse, 
@@ -28,17 +28,9 @@ from schemas import (
     QuestionResponse,
     AnswerResponse
 )
-from document_schemas import (
-    DocumentResponse,
-    DocumentListResponse,
-    DocumentUploadResponse,
-    DocumentSearchRequest,
-    DocumentSearchResponse
-)
 from rag_service import RAGService
 from pdf_service import PDFService
 import crud
-import document_crud
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -139,8 +131,8 @@ async def root():
             "auth_health": "/auth/health",
             "ask": "/ask",
             "questions": "/questions",
-            "upload": "/documents/upload",
             "documents": "/documents",
+            "upload": "/documents/upload",
             "search": "/documents/search"
         }
     }
@@ -160,6 +152,15 @@ async def health_check(db: Session = Depends(get_db)):
         timestamp=datetime.utcnow(),
         database_connected=database_connected,
         openai_configured=rag_service.openai_configured
+    )
+
+@app.get("/auth/health", response_model=AuthHealthResponse)
+async def auth_health_check(api_key: str = Depends(verify_api_key)):
+    """Authenticated health check endpoint"""
+    return AuthHealthResponse(
+        status="authenticated",
+        message="API key is valid",
+        timestamp=datetime.utcnow()
     )
 
 @app.post("/ask", response_model=QuestionAnswerResponse)
@@ -189,14 +190,44 @@ async def ask_question(
         )
         
         # Search for relevant document chunks
-        relevant_chunks = document_crud.search_similar_chunks(
-            db, query_embedding, limit=3
-        )
+        relevant_chunks = []
+        source_documents = []
+        
+        try:
+            # Convert embedding to list for SQL query
+            embedding_list = query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else query_embedding
+            
+            # Search for similar chunks using cosine similarity
+            result = db.execute(text("""
+                SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
+                       d.original_filename,
+                       1 - (dc.chunk_embedding <=> :embedding) as similarity
+                FROM document_chunks dc
+                JOIN documents d ON dc.document_id = d.id
+                WHERE dc.chunk_embedding IS NOT NULL
+                ORDER BY dc.chunk_embedding <=> :embedding
+                LIMIT 3
+            """), {"embedding": embedding_list})
+            
+            for row in result:
+                chunk_id, doc_id, content, page_number, filename, similarity = row
+                relevant_chunks.append({
+                    "chunk_id": chunk_id,
+                    "document_id": doc_id,
+                    "content": content,
+                    "page_number": page_number,
+                    "filename": filename,
+                    "similarity": similarity
+                })
+                source_documents.append(filename)
+                
+            print(f"📄 Found {len(relevant_chunks)} relevant document chunks")
+        except Exception as e:
+            print(f"⚠️ Error searching document chunks: {str(e)}")
         
         # Determine if we should use cached answer or generate new one
         is_cached = False
         answer_text = ""
-        source_documents = []
         
         if similar_question and similarity_score >= rag_service.similarity_threshold:
             # Use cached answer from similar question
@@ -216,13 +247,9 @@ async def ask_question(
             # Prepare context from relevant chunks
             context = ""
             if relevant_chunks:
-                print(f"📄 Found {len(relevant_chunks)} relevant document chunks")
                 context_parts = []
                 for chunk in relevant_chunks:
-                    doc = document_crud.get_document(db, chunk.document_id)
-                    if doc:
-                        context_parts.append(f"From {doc.original_filename} (Page {chunk.page_number or 'N/A'}):\n{chunk.content}")
-                        source_documents.append(doc.original_filename)
+                    context_parts.append(f"From {chunk['filename']} (Page {chunk['page_number'] or 'N/A'}):\n{chunk['content']}")
                 
                 context = "\n\n".join(context_parts)
             
@@ -276,11 +303,74 @@ Please answer the question based on the provided context. If the context doesn't
             detail=f"Error processing question: {str(e)}"
         )
 
-# Document Management Endpoints
+@app.get("/questions", response_model=List[QuestionResponse])
+async def get_questions(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get a list of questions"""
+    questions = crud.get_questions(db, skip=skip, limit=limit)
+    return questions
 
-@app.post("/documents/upload", response_model=DocumentUploadResponse)
+@app.get("/documents")
+async def list_documents(
+    page: int = 1,
+    per_page: int = 10,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """List all uploaded documents"""
+    try:
+        # Calculate offset
+        offset = (page - 1) * per_page
+        
+        # Get total count
+        total_result = db.execute(text("SELECT COUNT(*) FROM documents"))
+        total = total_result.fetchone()[0]
+        
+        # Query documents with pagination
+        result = db.execute(text("""
+            SELECT id, filename, original_filename, file_size, 
+                   content_type, upload_date, processed, processing_status,
+                   total_pages, total_chunks
+            FROM documents 
+            ORDER BY upload_date DESC
+            LIMIT :limit OFFSET :offset
+        """), {"limit": per_page, "offset": offset})
+        
+        documents = []
+        for row in result:
+            documents.append({
+                "id": row[0],
+                "filename": row[1],
+                "original_filename": row[2],
+                "file_size": row[3],
+                "content_type": row[4],
+                "upload_date": row[5],
+                "processed": row[6],
+                "processing_status": row[7],
+                "total_pages": row[8],
+                "total_chunks": row[9]
+            })
+        
+        return {
+            "documents": documents,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        }
+        
+    except Exception as e:
+        print(f"❌ Error listing documents: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error listing documents: {str(e)}"
+        )
+
+@app.post("/documents/upload")
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
@@ -309,18 +399,18 @@ async def upload_document(
         
         print(f"📤 Uploading document: {file.filename} ({len(file_content)} bytes)")
         
-        # Process PDF in background
-        document = await pdf_service.process_pdf(
+        # Process PDF
+        result = await pdf_service.process_pdf(
             db, file_content, unique_filename, file.filename
         )
         
-        return DocumentUploadResponse(
-            message="Document uploaded and processed successfully",
-            document_id=document.id,
-            filename=document.original_filename,
-            file_size=document.file_size,
-            processing_status=document.processing_status
-        )
+        return {
+            "message": "Document uploaded and processing started",
+            "document_id": result["document_id"],
+            "filename": file.filename,
+            "file_size": len(file_content),
+            "processing_status": result.get("status", "processing")
+        }
         
     except HTTPException:
         raise
@@ -331,39 +421,61 @@ async def upload_document(
             detail=f"Error uploading document: {str(e)}"
         )
 
-@app.get("/documents", response_model=DocumentListResponse)
-async def list_documents(
-    page: int = 1,
-    per_page: int = 10,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """List all uploaded documents"""
-    skip = (page - 1) * per_page
-    documents = document_crud.get_documents(db, skip=skip, limit=per_page)
-    total = document_crud.get_document_count(db)
-    
-    return DocumentListResponse(
-        documents=documents,
-        total=total,
-        page=page,
-        per_page=per_page
-    )
-
-@app.get("/documents/{document_id}", response_model=DocumentResponse)
+@app.get("/documents/{document_id}")
 async def get_document(
     document_id: int,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
     """Get document details"""
-    document = document_crud.get_document(db, document_id)
-    if not document:
+    try:
+        # Get document
+        result = db.execute(text("""
+            SELECT id, filename, original_filename, file_size, 
+                   content_type, upload_date, processed, processing_status,
+                   error_message, total_pages, total_chunks
+            FROM documents 
+            WHERE id = :id
+        """), {"id": document_id})
+        
+        document = result.fetchone()
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Get chunk count
+        chunk_result = db.execute(text("""
+            SELECT COUNT(*) FROM document_chunks WHERE document_id = :id
+        """), {"id": document_id})
+        
+        chunk_count = chunk_result.fetchone()[0]
+        
+        return {
+            "id": document[0],
+            "filename": document[1],
+            "original_filename": document[2],
+            "file_size": document[3],
+            "content_type": document[4],
+            "upload_date": document[5],
+            "processed": document[6],
+            "processing_status": document[7],
+            "error_message": document[8],
+            "total_pages": document[9],
+            "total_chunks": document[10],
+            "actual_chunk_count": chunk_count
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error getting document: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting document: {str(e)}"
         )
-    return document
 
 @app.delete("/documents/{document_id}")
 async def delete_document(
@@ -372,60 +484,83 @@ async def delete_document(
     api_key: str = Depends(verify_api_key)
 ):
     """Delete a document and all its chunks"""
-    success = document_crud.delete_document(db, document_id)
-    if not success:
+    try:
+        # Check if document exists
+        result = db.execute(text("SELECT id FROM documents WHERE id = :id"), {"id": document_id})
+        if not result.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Delete document (chunks will be deleted automatically due to CASCADE)
+        db.execute(text("DELETE FROM documents WHERE id = :id"), {"id": document_id})
+        db.commit()
+        
+        return {"message": "Document deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting document: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting document: {str(e)}"
         )
-    return {"message": "Document deleted successfully"}
 
-@app.post("/documents/search", response_model=DocumentSearchResponse)
+@app.post("/documents/search")
 async def search_documents(
-    request: DocumentSearchRequest,
+    query: str,
+    limit: int = 5,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
     """Search for relevant document chunks"""
     try:
+        if not query.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Search query cannot be empty"
+            )
+        
         # Generate embedding for search query
-        query_embedding = await rag_service.generate_embedding(request.query)
+        query_embedding = await rag_service.generate_embedding(query)
         
-        # Search for similar chunks
-        chunks = document_crud.search_similar_chunks(
-            db, query_embedding, 
-            limit=request.limit,
-            document_ids=request.document_ids
-        )
+        # Convert embedding to list for SQL query
+        embedding_list = query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else query_embedding
         
-        # Format results
+        # Search for similar chunks using cosine similarity
+        result = db.execute(text("""
+            SELECT dc.id, dc.document_id, dc.content, dc.page_number, 
+                   d.original_filename,
+                   1 - (dc.chunk_embedding <=> :embedding) as similarity
+            FROM document_chunks dc
+            JOIN documents d ON dc.document_id = d.id
+            WHERE dc.chunk_embedding IS NOT NULL
+            ORDER BY dc.chunk_embedding <=> :embedding
+            LIMIT :limit
+        """), {"embedding": embedding_list, "limit": limit})
+        
         results = []
-        for chunk in chunks:
-            document = document_crud.get_document(db, chunk.document_id)
-            if document:
-                # Calculate similarity score
-                chunk_vector = np.array(chunk.chunk_embedding) if chunk.chunk_embedding else None
-                similarity_score = 0.0
-                if chunk_vector is not None:
-                    similarity_score = float(np.dot(query_embedding, chunk_vector) / (
-                        np.linalg.norm(query_embedding) * np.linalg.norm(chunk_vector)
-                    ))
-                
-                results.append({
-                    "chunk_id": chunk.id,
-                    "document_id": document.id,
-                    "document_filename": document.original_filename,
-                    "content": chunk.content,
-                    "page_number": chunk.page_number,
-                    "similarity_score": similarity_score
-                })
+        for row in result:
+            chunk_id, doc_id, content, page_number, filename, similarity = row
+            results.append({
+                "chunk_id": chunk_id,
+                "document_id": doc_id,
+                "document_filename": filename,
+                "content": content,
+                "page_number": page_number,
+                "similarity_score": similarity
+            })
         
-        return DocumentSearchResponse(
-            results=results,
-            query=request.query,
-            total_results=len(results)
-        )
+        return {
+            "results": results,
+            "query": query,
+            "total_results": len(results)
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Error searching documents: {str(e)}")
         raise HTTPException(
@@ -439,20 +574,42 @@ async def get_stats(
     api_key: str = Depends(verify_api_key)
 ):
     """Get API statistics"""
-    question_count = crud.get_question_count(db)
-    answer_count = crud.get_answer_count(db)
-    document_count = document_crud.get_document_count(db)
-    chunk_count = document_crud.get_chunk_count(db)
-    
-    return {
-        "questions": question_count,
-        "answers": answer_count,
-        "documents": document_count,
-        "chunks": chunk_count,
-        "embeddings": len(crud.get_all_embeddings(db)),
-        "openai_configured": rag_service.openai_configured,
-        "similarity_threshold": rag_service.similarity_threshold
-    }
+    try:
+        # Get counts from database
+        question_count = db.execute(text("SELECT COUNT(*) FROM questions")).fetchone()[0]
+        answer_count = db.execute(text("SELECT COUNT(*) FROM answers")).fetchone()[0]
+        document_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
+        chunk_count = db.execute(text("SELECT COUNT(*) FROM document_chunks")).fetchone()[0]
+        embedding_count = db.execute(text("SELECT COUNT(*) FROM embeddings")).fetchone()[0]
+        
+        # Get processing status counts
+        processing_counts = {}
+        status_result = db.execute(text("""
+            SELECT processing_status, COUNT(*) 
+            FROM documents 
+            GROUP BY processing_status
+        """))
+        
+        for row in status_result:
+            processing_counts[row[0]] = row[1]
+        
+        return {
+            "questions": question_count,
+            "answers": answer_count,
+            "documents": document_count,
+            "chunks": chunk_count,
+            "embeddings": embedding_count,
+            "document_status": processing_counts,
+            "openai_configured": rag_service.openai_configured,
+            "similarity_threshold": rag_service.similarity_threshold
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting stats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting stats: {str(e)}"
+        )
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
