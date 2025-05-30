@@ -22,16 +22,14 @@ class AnswerFeedback(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     user_session = Column(String(100), nullable=True)  # Optional session tracking
     
-    # Relationships
-    question = relationship("Question", back_populates="feedback")
-    answer = relationship("Answer", back_populates="feedback")
+    # Simple relationships without back_populates to avoid circular import issues
+    # question = relationship("Question")
+    # answer = relationship("Answer")
 
-# Add to existing models
-from models import Question, Answer
-
-# Add feedback relationship to existing models
-Question.feedback = relationship("AnswerFeedback", back_populates="question")
-Answer.feedback = relationship("AnswerFeedback", back_populates="answer")
+# Remove these lines that are causing the error:
+# from models import Question, Answer
+# Question.feedback = relationship("AnswerFeedback", back_populates="question")
+# Answer.feedback = relationship("AnswerFeedback", back_populates="answer")
 
 print("✅ Feedback models created:")
 print("- Answer feedback tracking (thumbs up/down)")
