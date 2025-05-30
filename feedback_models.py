@@ -1,9 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
-
-Base = declarative_base()
+from database import Base
 
 class AnswerFeedback(Base):
     __tablename__ = "answer_feedback"
@@ -21,15 +19,6 @@ class AnswerFeedback(Base):
     # Metadata
     created_at = Column(DateTime, default=datetime.utcnow)
     user_session = Column(String(100), nullable=True)  # Optional session tracking
-    
-    # Simple relationships without back_populates to avoid circular import issues
-    # question = relationship("Question")
-    # answer = relationship("Answer")
-
-# Remove these lines that are causing the error:
-# from models import Question, Answer
-# Question.feedback = relationship("AnswerFeedback", back_populates="question")
-# Answer.feedback = relationship("AnswerFeedback", back_populates="answer")
 
 print("✅ Feedback models created:")
 print("- Answer feedback tracking (thumbs up/down)")
