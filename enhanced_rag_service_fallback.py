@@ -1,7 +1,3 @@
-"""
-Enhanced RAG service with fallback similarity calculation
-This version works without pgvector extension
-"""
 from sqlalchemy.orm import Session
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
@@ -12,7 +8,7 @@ import openai
 from datetime import datetime
 
 class EnhancedRAGService:
-    """Enhanced RAG service with fallback similarity calculation"""
+    """Enhanced RAG service with Python-based similarity calculation (no pgvector required)"""
     
     def __init__(self):
         """Initialize the RAG service"""
@@ -25,7 +21,7 @@ class EnhancedRAGService:
             openai.api_key = self.openai_api_key
     
     def cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Calculate cosine similarity between two vectors"""
+        """Calculate cosine similarity between two vectors using NumPy"""
         try:
             # Convert to numpy arrays
             a = np.array(vec1)
@@ -63,7 +59,7 @@ class EnhancedRAGService:
             return [0.0] * 1536
     
     async def find_similar_question(self, db: Session, query_embedding: List[float]) -> Tuple[Any, float]:
-        """Find semantically similar question in database using Python similarity calculation"""
+        """Find semantically similar question in database using Python similarity"""
         from models import Question, Embedding
         
         try:
@@ -72,8 +68,8 @@ class EnhancedRAGService:
                 Embedding, Question.id == Embedding.question_id
             ).all()
             
-            best_question = None
             best_similarity = 0.0
+            best_question = None
             
             for question, embedding in questions_with_embeddings:
                 if embedding.vector:
@@ -96,7 +92,7 @@ class EnhancedRAGService:
         query_embedding: List[float],
         limit: int = 5
     ) -> List[Dict[str, Any]]:
-        """Search document chunks using Python similarity calculation"""
+        """Search document chunks using Python-based vector similarity"""
         from document_models import DocumentChunk, Document
         
         try:
@@ -122,7 +118,7 @@ class EnhancedRAGService:
                     })
             
             # Sort by similarity and return top results
-            chunk_similarities.sort(key=lambda x: x['similarity'], reverse=True)
+            chunk_similarities.sort(key=lambda x: x["similarity"], reverse=True)
             return chunk_similarities[:limit]
             
         except Exception as e:
