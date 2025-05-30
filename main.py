@@ -11,14 +11,6 @@ import uvicorn
 from dotenv import load_dotenv
 import logging
 from contextlib import asynccontextmanager
-from override_models import User, AnswerOverride, AnswerReview, PerformanceCache, UserRole, ReviewStatus
-from override_schemas import (
-    UserCreate, UserResponse, OverrideCreate, OverrideResponse, 
-    ReviewCreate, ReviewResponse, EnhancedQuestionAnswerResponse,
-    ReviewQueueItem, ReviewStats
-)
-import override_crud
-from enhanced_rag_service import EnhancedRAGService
 import time
 
 # Load environment variables
@@ -29,6 +21,7 @@ from database import SessionLocal, engine, get_db, Base
 from models import Question, Answer, Embedding
 from document_models import Document, DocumentChunk
 from feedback_models import AnswerFeedback
+from override_models import User, AnswerOverride, AnswerReview, PerformanceCache, UserRole, ReviewStatus
 from schemas import (
     QuestionAnswerRequest, 
     QuestionAnswerResponse, 
@@ -37,8 +30,14 @@ from schemas import (
     QuestionResponse,
     AnswerResponse
 )
+from override_schemas import (
+    UserCreate, UserResponse, OverrideCreate, OverrideResponse, 
+    ReviewCreate, ReviewResponse, EnhancedQuestionAnswerResponse,
+    ReviewQueueItem, ReviewStats
+)
 from feedback_schemas import FeedbackCreate, FeedbackResponse, QuestionSuggestion
-from rag_service import RAGService
+from enhanced_rag_service import EnhancedRAGService
+import override_crud
 import crud
 from simple_pdf_processor import SimplePDFProcessor
 
@@ -87,8 +86,8 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI app
 app = FastAPI(
     title="Enhanced PDF RAG Q&A API",
-    description="A comprehensive FastAPI backend for PDF document processing and Q&A using RAG with feedback system",
-    version="2.0.0",
+    description="A comprehensive FastAPI backend for PDF document processing and Q&A using RAG with human override system, performance caching, and reviewer workflow",
+    version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
@@ -158,16 +157,20 @@ async def root():
     """Root endpoint"""
     return {
         "message": "Enhanced PDF RAG Q&A API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "status": "running",
         "features": [
-            "PDF document processing",
+            "PDF document processing with chunk limiting (3-5 chunks)",
             "Vector similarity search",
             "Historical Q&A integration",
             "Answer feedback system",
+            "Human override system for compliance",
+            "Reviewer workflow with insufficient answer tagging",
+            "Performance caching for slow-generating answers",
             "Low confidence flagging",
             "Question rephrasing suggestions",
-            "GPT fallback for unknown questions"
+            "GPT fallback for unknown questions",
+            "Role-based access control (user/reviewer/admin)"
         ],
         "endpoints": {
             "health": "/health",
@@ -178,7 +181,11 @@ async def root():
             "upload": "/documents/upload",
             "stats": "/stats",
             "qa-cache": "/qa-cache",
-            "debug/chunks": "/debug/chunks"
+            "debug/chunks": "/debug/chunks",
+            "users": "/users",
+            "overrides": "/overrides",
+            "reviews": "/reviews",
+            "cache": "/cache"
         }
     }
 
@@ -509,6 +516,7 @@ async def suggest_questions(
             detail=f"Error generating suggestions: {str(e)}"
         )
 
+# Document Management Endpoints
 @app.get("/documents")
 async def list_documents(
     db: Session = Depends(get_db),
@@ -655,6 +663,7 @@ async def delete_document(
             detail=f"Error deleting document: {str(e)}"
         )
 
+# Statistics and Debug Endpoints
 @app.get("/stats")
 async def get_stats(
     db: Session = Depends(get_db),
@@ -667,14 +676,20 @@ async def get_stats(
         answer_count = db.execute(text("SELECT COUNT(*) FROM answers")).fetchone()[0]
         document_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
         chunk_count = db.execute(text("SELECT COUNT(*) FROM document_chunks")).fetchone()[0]
+        override_count = db.execute(text("SELECT COUNT(*) FROM answer_overrides WHERE status = 'active'")).fetchone()[0]
+        review_count = db.execute(text("SELECT COUNT(*) FROM answer_reviews")).fetchone()[0]
+        cache_count = db.execute(text("SELECT COUNT(*) FROM performance_cache")).fetchone()[0]
         
         return {
             "questions": question_count,
             "answers": answer_count,
             "documents": document_count,
             "chunks": chunk_count,
+            "active_overrides": override_count,
+            "reviews": review_count,
+            "cached_answers": cache_count,
             "openai_configured": rag_service.openai_configured,
-            "version": "2.0.0 - Enhanced PDF RAG with Document Search"
+            "version": "3.0.0 - Enhanced PDF RAG with Human Override System"
         }
         
     except Exception as e:
@@ -696,7 +711,8 @@ async def get_qa_cache(
         # Get questions with their latest answers
         result = db.execute(text("""
             SELECT q.id, q.text as question, q.created_at,
-                   a.text as answer, a.confidence_score, a.created_at as answer_date
+                   a.text as answer, a.confidence_score, a.created_at as answer_date,
+                   EXISTS(SELECT 1 FROM answer_overrides ao WHERE ao.question_id = q.id AND ao.status = 'active') as has_override
             FROM questions q
             JOIN answers a ON q.id = a.question_id
             WHERE a.id = (
@@ -717,7 +733,8 @@ async def get_qa_cache(
                 "question_date": row[2],
                 "answer": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
                 "confidence": float(row[4]),
-                "answer_date": row[5]
+                "answer_date": row[5],
+                "has_override": row[6]
             })
         
         return {
@@ -851,6 +868,13 @@ async def list_users(
     """List all users (Admin only)"""
     return override_crud.get_users(db, skip, limit)
 
+@app.get("/users/me", response_model=UserResponse)
+async def get_current_user_info(
+    current_user: User = Depends(get_current_user)
+):
+    """Get current user information"""
+    return current_user
+
 # Override Management Endpoints
 @app.post("/overrides", response_model=OverrideResponse)
 async def create_override(
@@ -895,6 +919,21 @@ async def get_override_for_question(
             detail="No active override found for this question"
         )
     return override
+
+@app.delete("/overrides/{override_id}")
+async def revoke_override(
+    override_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.REVIEWER))
+):
+    """Revoke an override (Reviewer/Admin only)"""
+    override = override_crud.revoke_override(db, override_id)
+    if not override:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Override not found"
+        )
+    return {"message": "Override revoked successfully"}
 
 # Review Management Endpoints
 @app.post("/reviews", response_model=ReviewResponse)
@@ -987,6 +1026,31 @@ async def cleanup_cache(
     """Clean up expired cache entries (Admin only)"""
     expired_count = override_crud.cleanup_expired_cache(db)
     return {"message": f"Cleaned up {expired_count} expired cache entries"}
+
+@app.delete("/cache/clear")
+async def clear_all_cache(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.ADMIN))
+):
+    """Clear all cache entries (Admin only)"""
+    try:
+        result = db.execute(text("DELETE FROM performance_cache"))
+        db.commit()
+        return {"message": f"Cleared all cache entries"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error clearing cache: {str(e)}"
+        )
+
+# Chunk Usage Analytics
+@app.get("/analytics/chunks")
+async def get_chunk_analytics(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.REVIEWER))
+):
+    """Get chunk usage analytics (Reviewer/Admin only)"""
+    return override_crud.get_chunk_usage_stats(db)
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
