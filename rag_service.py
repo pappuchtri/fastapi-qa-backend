@@ -79,55 +79,59 @@ class RAGService:
         Returns the question and similarity score
         """
         try:
-    # Handle both list and string formats
-    if isinstance(emb.vector, list):
-        vector = np.array([float(x) for x in emb.vector])
-    elif isinstance(emb.vector, str):
-        # Handle string format (legacy data)
-        import json
-        vector_list = json.loads(emb.vector)
-        vector = np.array([float(x) for x in vector_list])
-    else:
-        vector = np.array(emb.vector)
-    
-    # Ensure vector has correct dimension
-    if len(vector) != self.embedding_dimension:
-        print(f"⚠️ Skipping embedding {emb.id}: wrong dimension {len(vector)}")
-        continue
-    
-    # Calculate cosine similarity
-    similarity = self.calculate_cosine_similarity(query_embedding, vector)
-    
-    if similarity > best_similarity:
-        best_similarity = similarity
-        question = db.query(Question).filter(Question.id == emb.question_id).first()
-        best_question = question
+            print("🔍 Searching for similar questions in database...")
+            
+            # Get all embeddings from database
+            embeddings = db.query(Embedding).all()
+            
+            if not embeddings:
+                print("📭 No embeddings found in database")
+                return None, 0.0
+            
+            print(f"📊 Found {len(embeddings)} embeddings to compare")
+            
+            best_similarity = 0.0
+            best_question = None
+            
+            for emb in embeddings:
+                try:
+                    # Handle both list and string formats
+                    if isinstance(emb.vector, list):
+                        vector = np.array([float(x) for x in emb.vector])
+                    elif isinstance(emb.vector, str):
+                        # Handle string format (legacy data)
+                        import json
+                        vector_list = json.loads(emb.vector)
+                        vector = np.array([float(x) for x in vector_list])
+                    else:
+                        vector = np.array(emb.vector)
+                    
+                    # Ensure vector has correct dimension
+                    if len(vector) != self.embedding_dimension:
+                        print(f"⚠️ Skipping embedding {emb.id}: wrong dimension {len(vector)}")
+                        continue
+                    
+                    # Calculate cosine similarity
+                    similarity = self.calculate_cosine_similarity(query_embedding, vector)
+                    
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        question = db.query(Question).filter(Question.id == emb.question_id).first()
+                        best_question = question
+                        
+                except Exception as e:
+                    print(f"⚠️ Error processing embedding {emb.id}: {str(e)}")
+                    continue
+            
+            print(f"🎯 Best match: {best_similarity:.3f} similarity")
+            if best_question:
+                print(f"📝 Similar question: {best_question.text[:50]}...")
+            
+            return best_question, float(best_similarity)
         
-except Exception as e:
-    print(f"⚠️ Error processing embedding {emb.id}: {str(e)}")
-    continue
-                
-                # Calculate cosine similarity
-                similarity = self.calculate_cosine_similarity(query_embedding, vector)
-                
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    question = db.query(Question).filter(Question.id == emb.question_id).first()
-                    best_question = question
-                
-            except Exception as e:
-                print(f"⚠️ Error processing embedding {emb.id}: {str(e)}")
-                continue
-        
-        print(f"🎯 Best match: {best_similarity:.3f} similarity")
-        if best_question:
-            print(f"📝 Similar question: {best_question.text[:50]}...")
-        
-        return best_question, float(best_similarity)
-        
-    except Exception as e:
-        print(f"❌ Error in similarity search: {str(e)}")
-        return None, 0.0
+        except Exception as e:
+            print(f"❌ Error in similarity search: {str(e)}")
+            return None, 0.0
     
     async def search_document_chunks(
         self, 
