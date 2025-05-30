@@ -45,8 +45,8 @@ class QuestionAnswerResponse(BaseModel):
     
     # New enhanced fields
     low_confidence: bool = Field(False, description="Flag for low confidence answers (< 0.80)")
-    answer_type: str = Field(..., description="Type of answer: cached, document, gpt")
-    confidence_score: float = Field(..., ge=0.0, le=1.0, description="System confidence in the answer")
+    answer_type: str = Field("document", description="Type of answer: cached, document, gpt")
+    confidence_score: float = Field(0.95, ge=0.0, le=1.0, description="System confidence in the answer")
 
 class HealthResponse(BaseModel):
     status: str = "healthy"
@@ -59,3 +59,39 @@ class AuthHealthResponse(BaseModel):
     status: str = "authenticated"
     message: str = "API key is valid"
     timestamp: datetime
+
+# Feedback schemas
+class FeedbackCreate(BaseModel):
+    question_id: int
+    answer_id: int
+    is_helpful: bool
+    feedback_text: Optional[str] = None
+    user_session: Optional[str] = None
+
+class FeedbackResponse(BaseModel):
+    id: int
+    question_id: int
+    answer_id: int
+    is_helpful: bool
+    feedback_text: Optional[str]
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class FeedbackStats(BaseModel):
+    total_feedback: int
+    helpful_count: int
+    not_helpful_count: int
+    helpful_percentage: float
+    
+    # Breakdown by answer type
+    document_answers_feedback: int
+    cached_answers_feedback: int
+    gpt_answers_feedback: int
+    
+    # Confidence correlation
+    avg_confidence_helpful: float
+    avg_confidence_not_helpful: float
+
+# Finally, let's create a simple database migration to add the feedback table:
