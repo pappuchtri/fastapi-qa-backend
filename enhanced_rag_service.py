@@ -38,36 +38,52 @@ class EnhancedRAGService:
             return [0.0] * 1536
     
     async def find_similar_question(self, db: Session, query_embedding: List[float]) -> Tuple[Any, float]:
-        """Find semantically similar question in database"""
-        from sqlalchemy import text
+        """Find semantically similar question in database using Python-based similarity"""
+        try:
+            from models import Question, Embedding
         
-        # Convert embedding to PostgreSQL array format
-        embedding_str = str(query_embedding).replace('[', '{').replace(']', '}')
+            # Get all questions with embeddings using Python-based similarity
+            embeddings = db.query(Embedding).all()
         
-        # Query for similar questions using cosine similarity
-        query = text("""
-            SELECT 
-                q.id, 
-                q.text, 
-                1 - (e.vector <=> :embedding) as similarity
-            FROM 
-                questions q
-            JOIN 
-                embeddings e ON q.id = e.question_id
-            ORDER BY 
-                similarity DESC
-            LIMIT 1
-        """)
+            if not embeddings:
+                print("📭 No embeddings found in database")
+                return None, 0.0
         
-        result = db.execute(query, {"embedding": embedding_str})
-        row = result.fetchone()
+            print(f"📊 Found {len(embeddings)} embeddings to compare")
         
-        if row:
-            from models import Question
-            question = db.query(Question).filter(Question.id == row[0]).first()
-            return question, float(row[2])
+            best_similarity = 0.0
+            best_question = None
         
-        return None, 0.0
+            query_vector = np.array(query_embedding)
+        
+            for embedding in embeddings:
+                try:
+                    # Convert stored embedding to numpy array
+                    if isinstance(embedding.vector, list):
+                        stored_vector = np.array(embedding.vector)
+                    else:
+                        # Handle string format if needed
+                        import json
+                        stored_vector = np.array(json.loads(str(embedding.vector)))
+                
+                    # Calculate cosine similarity using Python
+                    similarity = self.cosine_similarity(query_embedding, stored_vector.tolist())
+                
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        question = db.query(Question).filter(Question.id == embedding.question_id).first()
+                        best_question = question
+                    
+                except Exception as e:
+                    print(f"⚠️ Error processing embedding {embedding.id}: {str(e)}")
+                    continue
+        
+            print(f"🎯 Best match: {best_similarity:.3f} similarity")
+            return best_question, best_similarity
+        
+        except Exception as e:
+            print(f"❌ Error finding similar question: {str(e)}")
+            return None, 0.0
     
     async def search_document_chunks(
         self, 
@@ -75,46 +91,58 @@ class EnhancedRAGService:
         query_embedding: List[float],
         limit: int = 5
     ) -> List[Dict[str, Any]]:
-        """Search document chunks using vector similarity"""
-        from sqlalchemy import text
+        """Search document chunks using Python-based vector similarity"""
+        try:
+            from document_models import DocumentChunk, Document
         
-        # Convert embedding to PostgreSQL array format
-        embedding_str = str(query_embedding).replace('[', '{').replace(']', '}')
+            # Get all chunks with embeddings using Python-based similarity
+            chunks = db.query(DocumentChunk).join(Document).filter(
+                DocumentChunk.chunk_embedding.isnot(None),
+                Document.processed == True
+            ).all()
         
-        # Query for similar chunks using cosine similarity
-        query = text("""
-            SELECT 
-                dc.id, 
-                dc.content, 
-                dc.page_number,
-                dc.chunk_index,
-                d.original_filename,
-                1 - (dc.chunk_embedding <=> :embedding) as similarity
-            FROM 
-                document_chunks dc
-            JOIN 
-                documents d ON dc.document_id = d.id
-            WHERE 
-                dc.chunk_embedding IS NOT NULL
-            ORDER BY 
-                similarity DESC
-            LIMIT :limit
-        """)
+            if not chunks:
+                print("📭 No document chunks with embeddings found")
+                return []
         
-        result = db.execute(query, {"embedding": embedding_str, "limit": limit})
+            print(f"📊 Found {len(chunks)} document chunks to search")
         
-        chunks = []
-        for row in result:
-            chunks.append({
-                "id": row[0],
-                "content": row[1],
-                "page_number": row[2],
-                "chunk_index": row[3],
-                "filename": row[4],
-                "similarity": float(row[5])
-            })
+            chunk_similarities = []
         
-        return chunks
+            for chunk in chunks:
+                try:
+                    if chunk.chunk_embedding:
+                        # Calculate similarity using Python
+                        similarity = self.cosine_similarity(query_embedding, chunk.chunk_embedding)
+                    
+                        chunk_similarities.append({
+                            "id": chunk.id,
+                            "content": chunk.content,
+                            "page_number": chunk.page_number,
+                            "chunk_index": getattr(chunk, 'chunk_index', 0),
+                            "filename": chunk.document.original_filename if chunk.document else "Unknown",
+                            "similarity": similarity
+                        })
+                except Exception as e:
+                    print(f"⚠️ Error processing chunk {chunk.id}: {str(e)}")
+                    continue
+        
+            # Sort by similarity and return top results
+            chunk_similarities.sort(key=lambda x: x["similarity"], reverse=True)
+        
+            # Filter by minimum similarity threshold
+            min_similarity = 0.5
+            relevant_chunks = [
+                chunk for chunk in chunk_similarities 
+                if chunk["similarity"] >= min_similarity
+            ][:limit]
+        
+            print(f"🎯 Found {len(relevant_chunks)} relevant chunks (similarity >= {min_similarity})")
+            return relevant_chunks
+        
+        except Exception as e:
+            print(f"❌ Error searching document chunks: {str(e)}")
+            return []
     
     async def analyze_question_intent(self, question: str) -> Dict[str, Any]:
         """Analyze question intent to improve search and answer generation"""
@@ -326,3 +354,18 @@ class EnhancedRAGService:
         store_performance_cache(
             db, question, answer, generation_time_ms, confidence, source_type
         )
+
+    def cosine_similarity(self, a, b):
+        """
+        Calculates the cosine similarity between two vectors.
+        """
+        a = np.array(a)
+        b = np.array(b)
+        dot_product = np.dot(a, b)
+        magnitude_a = np.linalg.norm(a)
+        magnitude_b = np.linalg.norm(b)
+        
+        if magnitude_a == 0 or magnitude_b == 0:
+            return 0  # Handle zero vector case
+        
+        return dot_product / (magnitude_a * magnitude_b)
