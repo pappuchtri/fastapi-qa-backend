@@ -75,7 +75,7 @@ class RAGService:
         query_embedding: np.ndarray
     ) -> Tuple[Optional[Question], float]:
         """
-        Find the most similar question in the database using cosine similarity
+        Find the most similar question in the database using Python-based cosine similarity
         Returns the question and similarity score
         """
         try:
@@ -90,9 +90,8 @@ class RAGService:
             
             print(f"📊 Found {len(embeddings)} embeddings to compare")
             
-            # Convert stored embeddings to numpy array
-            stored_embeddings = []
-            questions = []
+            best_similarity = 0.0
+            best_question = None
             
             for emb in embeddings:
                 try:
@@ -106,43 +105,33 @@ class RAGService:
                         vector = np.array([float(x) for x in vector_list])
                     else:
                         vector = np.array(emb.vector)
-                    
-                    # Ensure vector has correct dimension
-                    if len(vector) != self.embedding_dimension:
-                        print(f"⚠️ Skipping embedding {emb.id}: wrong dimension {len(vector)}")
-                        continue
-                    
-                    stored_embeddings.append(vector)
-                    question = db.query(Question).filter(Question.id == emb.question_id).first()
-                    questions.append(question)
-                except Exception as e:
-                    print(f"⚠️ Error processing embedding {emb.id}: {str(e)}")
+                
+                # Ensure vector has correct dimension
+                if len(vector) != self.embedding_dimension:
+                    print(f"⚠️ Skipping embedding {emb.id}: wrong dimension {len(vector)}")
                     continue
-            
-            if not stored_embeddings:
-                print("📭 No valid embeddings found")
-                return None, 0.0
-            
-            # Calculate cosine similarities
-            stored_embeddings_matrix = np.vstack(stored_embeddings)
-            query_embedding_reshaped = query_embedding.reshape(1, -1)
-            
-            similarities = cosine_similarity(query_embedding_reshaped, stored_embeddings_matrix)[0]
-            
-            # Find the most similar question
-            max_similarity_idx = np.argmax(similarities)
-            max_similarity = similarities[max_similarity_idx]
-            most_similar_question = questions[max_similarity_idx]
-            
-            print(f"🎯 Best match: {max_similarity:.3f} similarity")
-            if most_similar_question:
-                print(f"📝 Similar question: {most_similar_question.text[:50]}...")
-            
-            return most_similar_question, float(max_similarity)
-            
-        except Exception as e:
-            print(f"❌ Error in similarity search: {str(e)}")
-            return None, 0.0
+                
+                # Calculate cosine similarity
+                similarity = self.calculate_cosine_similarity(query_embedding, vector)
+                
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    question = db.query(Question).filter(Question.id == emb.question_id).first()
+                    best_question = question
+                
+            except Exception as e:
+                print(f"⚠️ Error processing embedding {emb.id}: {str(e)}")
+                continue
+        
+        print(f"🎯 Best match: {best_similarity:.3f} similarity")
+        if best_question:
+            print(f"📝 Similar question: {best_question.text[:50]}...")
+        
+        return best_question, float(best_similarity)
+        
+    except Exception as e:
+        print(f"❌ Error in similarity search: {str(e)}")
+        return None, 0.0
     
     async def search_document_chunks(
         self, 
@@ -162,7 +151,7 @@ class RAGService:
             # Get all document chunks with embeddings
             chunks = db.query(DocumentChunk).join(Document).filter(
                 DocumentChunk.chunk_embedding.isnot(None),
-                Document.processed == True
+                DocumentChunk.processed == True
             ).all()
             
             if not chunks:
