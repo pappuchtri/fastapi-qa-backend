@@ -49,7 +49,7 @@ class EnhancedRAGService:
             SELECT 
                 q.id, 
                 q.text, 
-                1 - (e.embedding <=> :embedding) as similarity
+                1 - (e.vector <=> :embedding) as similarity
             FROM 
                 questions q
             JOIN 
