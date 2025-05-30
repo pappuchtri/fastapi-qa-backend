@@ -85,15 +85,77 @@ class PerformanceCache(Base):
     question_text = Column(Text, nullable=False)
     cached_answer = Column(Text, nullable=False)
     generation_time_ms = Column(Integer, nullable=False)  # Original generation time
-    confidence_score = Column(Integer, nullable=False)
+    confidence_score = Column(Float, nullable=False)
     source_type = Column(String(50), nullable=False)  # document, historical, gpt
     cache_hits = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_accessed = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)  # Optional expiration
 
-print("✅ Override and Review models created:")
-print("- User: manages user roles (user, reviewer, admin)")
-print("- AnswerOverride: stores human-corrected answers")
-print("- AnswerReview: tracks review workflow and quality flags")
-print("- PerformanceCache: caches slow-generating answers")
+class ChunkUsageLog(Base):
+    __tablename__ = "chunk_usage_log"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
+    chunk_id = Column(Integer, ForeignKey("document_chunks.id"), nullable=False)
+    relevance_score = Column(Float, nullable=False)
+    position_in_results = Column(Integer, nullable=False)  # 1-based position in results
+    was_used_in_answer = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    question = relationship("Question")
+    chunk = relationship("DocumentChunk")
+
+class ReviewTag(Base):
+    __tablename__ = "review_tags"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    tagged_reviews = relationship("ReviewTagAssociation", back_populates="tag")
+
+class ReviewTagAssociation(Base):
+    __tablename__ = "review_tag_associations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    review_id = Column(Integer, ForeignKey("answer_reviews.id"), nullable=False)
+    tag_id = Column(Integer, ForeignKey("review_tags.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    review = relationship("AnswerReview")
+    tag = relationship("ReviewTag", back_populates="tagged_reviews")
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    session_token = Column(String(255), unique=True, nullable=False)
+    ip_address = Column(String(50), nullable=True)
+    user_agent = Column(String(255), nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_activity = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User")
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    action = Column(String(100), nullable=False)
+    entity_type = Column(String(100), nullable=False)  # question, answer, override, etc.
+    entity_id = Column(Integer, nullable=False)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User")
