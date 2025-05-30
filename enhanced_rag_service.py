@@ -28,13 +28,20 @@ class EnhancedRAGService:
             self.openai_configured = False
         
         self.embedding_dimension = 1536  # text-embedding-ada-002 dimension
-        # Much lower thresholds to be more inclusive of PDF content
-        self.document_similarity_threshold = 0.3  # Very low to catch any potentially relevant content
+        # Optimized thresholds for better performance
+        self.document_similarity_threshold = 0.3  # Low to catch relevant content
         self.qa_similarity_threshold = 0.85  # High threshold for historical Q&A
         self.chat_model = "gpt-3.5-turbo"
         
+        # NEW: Chunk limiting and performance settings
+        self.max_chunks_per_question = 5  # Limit to 3-5 chunks for clarity
+        self.performance_cache_threshold_ms = 3000  # Cache answers that take >3 seconds
+        self.cache_expiry_hours = 24  # Cache expires after 24 hours
+        
         print(f"🤖 Enhanced RAG Service initialized with {self.chat_model}")
-        print(f"📄 Document similarity threshold: {self.document_similarity_threshold} (very inclusive)")
+        print(f"📄 Document similarity threshold: {self.document_similarity_threshold}")
+        print(f"🎯 Max chunks per question: {self.max_chunks_per_question}")
+        print(f"⚡ Performance caching: {self.performance_cache_threshold_ms}ms threshold")
         
     async def generate_embedding(self, text: str) -> np.ndarray:
         """Generate embedding for given text using OpenAI text-embedding-ada-002"""
@@ -533,7 +540,7 @@ Provide only the JSON response, no additional text."""
         chunks: List[Dict[str, Any]], 
         query_embedding: np.ndarray
     ) -> List[Dict[str, Any]]:
-        """Remove duplicates, consolidate related chunks, and rank by relevance"""
+        """Remove duplicates, consolidate related chunks, and rank by relevance - LIMITED TO 3-5 CHUNKS"""
         seen_chunks = set()
         unique_chunks = []
         
@@ -542,8 +549,8 @@ Provide only the JSON response, no additional text."""
             if chunk_id not in seen_chunks:
                 seen_chunks.add(chunk_id)
                 unique_chunks.append(chunk)
-        
-        # Consolidate related chunks from same document/page
+    
+    # Consolidate related chunks from same document/page
         consolidated_chunks = self._consolidate_related_chunks(unique_chunks, "")
         
         # Sort by similarity score, then by search method priority
@@ -557,7 +564,13 @@ Provide only the JSON response, no additional text."""
             reverse=True
         )
         
-        return consolidated_chunks
+        # LIMIT TO MAX CHUNKS FOR CLARITY AND PERFORMANCE
+        limited_chunks = consolidated_chunks[:self.max_chunks_per_question]
+        
+        if len(consolidated_chunks) > self.max_chunks_per_question:
+            print(f"🎯 Limited chunks from {len(consolidated_chunks)} to {len(limited_chunks)} for clarity")
+        
+        return limited_chunks
     
     async def search_historical_qa(
         self, 
@@ -893,6 +906,100 @@ With OpenAI configured, GPT-3.5 Turbo would provide a comprehensive answer based
             )
         
         return "\n\n".join(formatted_context)
+
+    async def check_performance_cache(self, db: Session, question: str) -> Optional[Dict[str, Any]]:
+        """Check if we have a cached answer for slow-generating questions"""
+        import hashlib
+        from override_models import PerformanceCache
+        from datetime import datetime
+        
+        question_hash = hashlib.md5(question.lower().strip().encode()).hexdigest()
+        
+        try:
+            cached = db.query(PerformanceCache).filter(
+                PerformanceCache.question_hash == question_hash
+            ).first()
+            
+            if cached:
+                # Check if cache is still valid
+                if cached.expires_at and cached.expires_at < datetime.utcnow():
+                    # Cache expired, delete it
+                    db.delete(cached)
+                    db.commit()
+                    return None
+                
+                # Update cache statistics
+                cached.cache_hits += 1
+                cached.last_accessed = datetime.utcnow()
+                db.commit()
+                
+                print(f"⚡ Performance cache HIT for question (hits: {cached.cache_hits})")
+                
+                return {
+                    "answer": cached.cached_answer,
+                    "confidence": cached.confidence_score / 100.0,  # Convert back to decimal
+                    "source_type": cached.source_type,
+                    "generation_time_ms": 0,  # Instant from cache
+                    "is_performance_cached": True,
+                    "cache_hits": cached.cache_hits
+                }
+        
+        except Exception as e:
+            print(f"⚠️ Error checking performance cache: {str(e)}")
+        
+        return None
+
+    async def store_performance_cache(
+        self, 
+        db: Session, 
+        question: str, 
+        answer: str, 
+        generation_time_ms: int,
+        confidence: float,
+        source_type: str
+    ) -> None:
+        """Store answer in performance cache if generation was slow"""
+        if generation_time_ms < self.performance_cache_threshold_ms:
+            return  # Don't cache fast answers
+        
+        import hashlib
+        from override_models import PerformanceCache
+        from datetime import timedelta, datetime
+        
+        question_hash = hashlib.md5(question.lower().strip().encode()).hexdigest()
+        
+        try:
+            # Check if already cached
+            existing = db.query(PerformanceCache).filter(
+                PerformanceCache.question_hash == question_hash
+            ).first()
+            
+            if existing:
+                # Update existing cache
+                existing.cached_answer = answer
+                existing.generation_time_ms = generation_time_ms
+                existing.confidence_score = int(confidence * 100)  # Store as integer
+                existing.source_type = source_type
+                existing.last_accessed = datetime.utcnow()
+                existing.expires_at = datetime.utcnow() + timedelta(hours=self.cache_expiry_hours)
+            else:
+                # Create new cache entry
+                cache_entry = PerformanceCache(
+                    question_hash=question_hash,
+                    question_text=question,
+                    cached_answer=answer,
+                    generation_time_ms=generation_time_ms,
+                    confidence_score=int(confidence * 100),
+                    source_type=source_type,
+                    expires_at=datetime.utcnow() + timedelta(hours=self.cache_expiry_hours)
+                )
+                db.add(cache_entry)
+        
+        db.commit()
+        print(f"⚡ Stored in performance cache (generation time: {generation_time_ms}ms)")
+        
+        except Exception as e:
+            print(f"⚠️ Error storing performance cache: {str(e)}")
 
 print("✅ Enhanced RAG Service initialized with EXHAUSTIVE PDF PRIORITIZATION:")
 print("- PRIORITY 1: Exhaustive PDF document search (5 strategies)")
