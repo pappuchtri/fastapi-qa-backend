@@ -22,7 +22,7 @@ class OverrideStatus(str, Enum):
 # User schemas
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=100)
-    email: str = Field(..., regex=r'^[^@]+@[^@]+\.[^@]+$')
+    email: str = Field(..., pattern=r'^[^@]+@[^@]+\.[^@]+$')
     role: UserRole = UserRole.USER
 
 class UserResponse(BaseModel):
@@ -33,8 +33,7 @@ class UserResponse(BaseModel):
     is_active: bool
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 # Override schemas
 class OverrideCreate(BaseModel):
@@ -54,8 +53,7 @@ class OverrideResponse(BaseModel):
     created_at: datetime
     approved_at: Optional[datetime]
     
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 # Review schemas
 class ReviewCreate(BaseModel):
@@ -83,8 +81,7 @@ class ReviewResponse(BaseModel):
     factual_accuracy_concern: bool
     compliance_concern: bool
     
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 # Enhanced Q&A response with override support
 class EnhancedQuestionAnswerResponse(BaseModel):
