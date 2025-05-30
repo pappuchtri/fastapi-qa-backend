@@ -448,7 +448,7 @@ async def suggest_questions(
         except:
             # Fallback: extract suggestions from text
             lines = ai_response.split('\n')
-            suggestions = [line.strip('- ').strip() for line in lines if line.strip() and not line.startswith('Reasoning'))][:5]
+            suggestions = [line.strip('- ').strip() for line in lines if line.strip() and not line.startswith('Reasoning')][:5]
             reasoning = "AI-generated suggestions to improve question clarity and get better search results."
         
         return QuestionSuggestion(
