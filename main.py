@@ -11,6 +11,15 @@ import uvicorn
 from dotenv import load_dotenv
 import logging
 from contextlib import asynccontextmanager
+from override_models import User, AnswerOverride, AnswerReview, PerformanceCache, UserRole, ReviewStatus
+from override_schemas import (
+    UserCreate, UserResponse, OverrideCreate, OverrideResponse, 
+    ReviewCreate, ReviewResponse, EnhancedQuestionAnswerResponse,
+    ReviewQueueItem, ReviewStats
+)
+import override_crud
+from enhanced_rag_service import EnhancedRAGService
+import time
 
 # Load environment variables
 load_dotenv()
@@ -37,8 +46,8 @@ from simple_pdf_processor import SimplePDFProcessor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize RAG service
-rag_service = RAGService()
+# Initialize Enhanced RAG service
+rag_service = EnhancedRAGService()
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -119,6 +128,31 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
     
     return api_key
 
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> User:
+    """Get current user from API key or session"""
+    api_key = credentials.credentials
+    
+    # For demo purposes, create a default admin user if none exists
+    admin_user = override_crud.get_user_by_username(db, "admin")
+    if not admin_user:
+        admin_user = override_crud.create_user(
+            db, 
+            UserCreate(username="admin", email="admin@example.com", role=UserRole.ADMIN)
+        )
+    
+    return admin_user
+
+def require_role(required_role: UserRole):
+    """Decorator to require specific user role"""
+    def role_checker(current_user: User = Depends(get_current_user)):
+        if current_user.role.value != required_role.value and current_user.role != UserRole.ADMIN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires {required_role.value} role"
+            )
+        return current_user
+    return role_checker
+
 @app.get("/", response_model=dict)
 async def root():
     """Root endpoint"""
@@ -165,15 +199,16 @@ async def health_check(db: Session = Depends(get_db)):
         openai_configured=rag_service.openai_configured
     )
 
-@app.post("/ask", response_model=QuestionAnswerResponse)
+@app.post("/ask", response_model=EnhancedQuestionAnswerResponse)
 async def ask_question(
     request: QuestionAnswerRequest,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Ask a question with enhanced features: caching, confidence flagging, source attribution"""
+    """Ask a question with enhanced features: chunk limiting, performance caching, override support"""
     try:
         question_text = request.question.strip()
+        start_time = time.time()
         
         if not question_text:
             raise HTTPException(
@@ -183,145 +218,153 @@ async def ask_question(
         
         print(f"🔍 Processing question: {question_text[:50]}...")
         
-        # Step 1: Generate embedding for semantic search
-        query_embedding = await rag_service.generate_embedding(question_text)
-        
-        # Step 2: Check Q&A cache first
-        print("🔍 STEP 1: Checking Q&A cache for similar questions...")
-        similar_question, similarity_score = await rag_service.find_similar_question(db, query_embedding)
-        
-        answer_type = "gpt"  # Default
-        confidence = 0.7
-        source_documents = []
-        low_confidence_flag = False
-        
-        if similar_question and similarity_score > rag_service.similarity_threshold:
-            print(f"✅ Found cached answer (similarity: {similarity_score:.3f})")
-            # Get the most recent answer for this cached question
-            cached_answer = db.query(Answer).filter(
-                Answer.question_id == similar_question.id
-            ).order_by(Answer.created_at.desc()).first()
+        # STEP 1: Check performance cache first
+        cached_result = await rag_service.check_performance_cache(db, question_text)
+        if cached_result:
+            print("⚡ Returning performance-cached answer")
             
-            if cached_answer:
-                answer_text = cached_answer.text
-                confidence = float(cached_answer.confidence_score)
-                answer_type = "cached"
-                
-                # Check for low confidence
-                if confidence < 0.80:
-                    low_confidence_flag = True
-                    print(f"⚠️ Low confidence cached answer: {confidence:.2f}")
-                
-                return QuestionAnswerResponse(
-                    answer=answer_text,
-                    question_id=similar_question.id,
-                    answer_id=cached_answer.id,
-                    similarity_score=similarity_score,
+            # Check for active override
+            question_id = None
+            override = None
+            
+            # Try to find existing question for override check
+            query_embedding = await rag_service.generate_embedding(question_text)
+            similar_question, similarity = await rag_service.find_similar_question(db, query_embedding)
+            if similar_question and similarity > 0.9:  # Very high similarity
+                question_id = similar_question.id
+                override = override_crud.get_active_override(db, question_id)
+            
+            if override:
+                return EnhancedQuestionAnswerResponse(
+                    answer=override.override_text,
+                    question_id=question_id,
+                    answer_id=override.original_answer_id,
+                    similarity_score=1.0,
                     is_cached=True,
                     source_documents=[],
-                    low_confidence=low_confidence_flag,
-                    answer_type=answer_type,
-                    confidence_score=confidence
+                    low_confidence=False,
+                    answer_type="override",
+                    confidence_score=1.0,
+                    has_override=True,
+                    override_id=override.id,
+                    needs_review=False,
+                    review_flags=[],
+                    generation_time_ms=0,
+                    chunk_count=0
                 )
-        
-        print("⚠️ No cached answer found, searching documents...")
-        
-        # Step 3: Search document chunks
-        print("🔍 STEP 2: Searching PDF documents...")
-        document_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
-        
-        # Step 4: Generate answer based on available context
-        if document_chunks:
-            print(f"✅ Found {len(document_chunks)} relevant document chunks")
-            answer_type = "document"
-            confidence = 0.95  # High confidence for document-based answers
             
-            # Create detailed context with source attribution
-            context_parts = []
-            source_documents = list(set([chunk['filename'] for chunk in document_chunks]))
-            
-            for chunk in document_chunks:
-                source_info = f"[Source: {chunk['filename']}, Page {chunk.get('page_number', 'N/A')}]"
-                context_parts.append(f"{source_info}\n{chunk['content'][:500]}...")
-            
-            context_text = "\n\n".join(context_parts)
-            
-            if rag_service.openai_configured:
-                # Use OpenAI to generate answer from document context
-                import openai
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a helpful assistant that answers questions based on the provided document context. Always cite the source documents and page numbers when possible. Be comprehensive and accurate."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Question: {question_text}\n\nDocument Context:\n{context_text}\n\nPlease answer the question based on the document context provided. Include specific references to the source documents and page numbers."
-                        }
-                    ],
-                    max_tokens=600,
-                    temperature=0.3
-                )
-                answer_text = response['choices'][0]['message']['content'].strip()
-            else:
-                # Demo mode - show document context
-                answer_text = f"""📄 **Answer based on uploaded documents:**
-
-{context_text}
-
-**Sources:** {', '.join(source_documents)}
-
-*Note: This is demo mode. With OpenAI configured, this would be a comprehensive answer based on the document content above.*"""
-            
-            print(f"📄 Generated answer from {len(source_documents)} documents")
-            
-        else:
-            print("⚠️ No relevant documents found, using GPT fallback")
-            # Fallback to GPT
-            answer_text = await rag_service.generate_answer(question_text)
-            confidence = 0.7
-            answer_type = "gpt"
-            source_documents = []
-        
-        # Check for low confidence
-        if confidence < 0.80:
-            low_confidence_flag = True
-            print(f"⚠️ Low confidence answer: {confidence:.2f}")
-        
-        # Step 5: Store the NEW question and answer in Q&A cache
-        print("💾 Storing question and answer in Q&A cache...")
-        new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
-        question_id = new_question.id
-        
-        # Store embedding for future similarity searches
-        crud.create_embedding(db, question_id, query_embedding)
-        
-        # Store answer
-        new_answer = crud.create_answer(
-            db, 
-            crud.AnswerCreate(
-                question_id=question_id,
-                text=answer_text,
-                confidence_score=confidence
+            return EnhancedQuestionAnswerResponse(
+                answer=cached_result["answer"],
+                question_id=question_id or 0,
+                answer_id=0,
+                similarity_score=1.0,
+                is_cached=True,
+                source_documents=[],
+                low_confidence=cached_result["confidence"] < 0.8,
+                answer_type=cached_result["source_type"],
+                confidence_score=cached_result["confidence"],
+                has_override=False,
+                override_id=None,
+                needs_review=cached_result["confidence"] < 0.8,
+                review_flags=["low_confidence"] if cached_result["confidence"] < 0.8 else [],
+                generation_time_ms=0,
+                chunk_count=0
             )
+        
+        # STEP 2: Generate embedding and analyze question
+        query_embedding = await rag_service.generate_embedding(question_text)
+        question_analysis = await rag_service.analyze_question_intent(question_text)
+        
+        # STEP 3: Process with enhanced RAG
+        result = await rag_service.process_question(
+            db, question_text, query_embedding, question_analysis
         )
-        answer_id = new_answer.id
         
-        print(f"✅ Cached Q&A pair (ID: {question_id}) for future use")
+        generation_time_ms = int((time.time() - start_time) * 1000)
         
-        # Prepare final response with enhanced metadata
-        return QuestionAnswerResponse(
-            answer=answer_text,
+        # STEP 4: Store or create question/answer records
+        question_id = result.get("question_id")
+        if not question_id:
+            # Create new question
+            new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
+            question_id = new_question.id
+            
+            # Store embedding
+            crud.create_embedding(db, question_id, query_embedding)
+            
+            # Store answer
+            new_answer = crud.create_answer(
+                db, 
+                crud.AnswerCreate(
+                    question_id=question_id,
+                    text=result["answer"],
+                    confidence_score=result["confidence"]
+                )
+            )
+            answer_id = new_answer.id
+        else:
+            # Use existing question/answer
+            answer_id = result.get("answer_id", 0)
+        
+        # STEP 5: Check for active override
+        override = override_crud.get_active_override(db, question_id)
+        if override:
+            print(f"🔄 Using human override for question {question_id}")
+            return EnhancedQuestionAnswerResponse(
+                answer=override.override_text,
+                question_id=question_id,
+                answer_id=answer_id,
+                similarity_score=result.get("similarity", 0.0),
+                is_cached=False,
+                source_documents=result.get("source_documents", []),
+                low_confidence=False,
+                answer_type="override",
+                confidence_score=1.0,
+                has_override=True,
+                override_id=override.id,
+                needs_review=False,
+                review_flags=[],
+                generation_time_ms=generation_time_ms,
+                chunk_count=result.get("total_chunks_found", 0)
+            )
+        
+        # STEP 6: Store in performance cache if slow
+        await rag_service.store_performance_cache(
+            db, question_text, result["answer"], generation_time_ms,
+            result["confidence"], result["source_type"]
+        )
+        
+        # STEP 7: Determine review flags
+        review_flags = []
+        needs_review = False
+        
+        if result["confidence"] < 0.8:
+            review_flags.append("low_confidence")
+            needs_review = True
+        
+        if result["source_type"] == "gpt":
+            review_flags.append("gpt_fallback")
+            needs_review = True
+        
+        if generation_time_ms > 5000:  # Very slow generation
+            review_flags.append("slow_generation")
+        
+        return EnhancedQuestionAnswerResponse(
+            answer=result["answer"],
             question_id=question_id,
             answer_id=answer_id,
-            similarity_score=0.0,  # New question, no similarity
-            is_cached=False,  # This is a new answer
-            source_documents=source_documents,
-            low_confidence=low_confidence_flag,
-            answer_type=answer_type,
-            confidence_score=confidence
+            similarity_score=result.get("similarity", 0.0),
+            is_cached=False,
+            source_documents=result.get("source_documents", []),
+            low_confidence=result["confidence"] < 0.8,
+            answer_type=result["source_type"],
+            confidence_score=result["confidence"],
+            has_override=False,
+            override_id=None,
+            needs_review=needs_review,
+            review_flags=review_flags,
+            generation_time_ms=generation_time_ms,
+            chunk_count=result.get("total_chunks_found", 0)
         )
         
     except HTTPException:
@@ -774,6 +817,176 @@ async def get_feedback_stats(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error getting feedback stats: {str(e)}"
         )
+
+# User Management Endpoints
+@app.post("/users", response_model=UserResponse)
+async def create_user(
+    user: UserCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.ADMIN))
+):
+    """Create a new user (Admin only)"""
+    # Check if user already exists
+    if override_crud.get_user_by_username(db, user.username):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already exists"
+        )
+    
+    if override_crud.get_user_by_email(db, user.email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already exists"
+        )
+    
+    return override_crud.create_user(db, user)
+
+@app.get("/users", response_model=List[UserResponse])
+async def list_users(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.ADMIN))
+):
+    """List all users (Admin only)"""
+    return override_crud.get_users(db, skip, limit)
+
+# Override Management Endpoints
+@app.post("/overrides", response_model=OverrideResponse)
+async def create_override(
+    override: OverrideCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.REVIEWER))
+):
+    """Create a human override for an answer (Reviewer/Admin only)"""
+    # Verify question and answer exist
+    question = db.query(Question).filter(Question.id == override.question_id).first()
+    answer = db.query(Answer).filter(Answer.id == override.original_answer_id).first()
+    
+    if not question or not answer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Question or answer not found"
+        )
+    
+    return override_crud.create_override(db, override, current_user.id)
+
+@app.get("/overrides", response_model=List[OverrideResponse])
+async def list_overrides(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.REVIEWER))
+):
+    """List all overrides (Reviewer/Admin only)"""
+    return override_crud.get_overrides(db, skip, limit)
+
+@app.get("/overrides/question/{question_id}", response_model=OverrideResponse)
+async def get_override_for_question(
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get active override for a specific question"""
+    override = override_crud.get_active_override(db, question_id)
+    if not override:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active override found for this question"
+        )
+    return override
+
+# Review Management Endpoints
+@app.post("/reviews", response_model=ReviewResponse)
+async def create_review(
+    review: ReviewCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.REVIEWER))
+):
+    """Create a review for an answer (Reviewer/Admin only)"""
+    # Verify question and answer exist
+    question = db.query(Question).filter(Question.id == review.question_id).first()
+    answer = db.query(Answer).filter(Answer.id == review.answer_id).first()
+    
+    if not question or not answer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Question or answer not found"
+        )
+    
+    return override_crud.create_review(db, review, current_user.id)
+
+@app.get("/reviews/queue", response_model=List[ReviewQueueItem])
+async def get_review_queue(
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.REVIEWER))
+):
+    """Get pending reviews queue (Reviewer/Admin only)"""
+    pending_reviews = override_crud.get_pending_reviews(db, skip, limit)
+    
+    queue_items = []
+    for review in pending_reviews:
+        queue_items.append(ReviewQueueItem(
+            question_id=review["question_id"],
+            question_text=review["question_text"],
+            answer_id=review["answer_id"],
+            answer_text=review["answer_text"],
+            confidence_score=review["confidence_score"],
+            answer_type="system",  # Default type
+            created_at=review["created_at"],
+            has_override=review["has_override"],
+            review_count=review["review_count"],
+            priority_score=review["priority_score"]
+        ))
+    
+    return queue_items
+
+@app.get("/reviews/insufficient", response_model=List[dict])
+async def get_insufficient_answers(
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.REVIEWER))
+):
+    """Get answers marked as insufficient (Reviewer/Admin only)"""
+    return override_crud.get_insufficient_answers(db, skip, limit)
+
+@app.get("/reviews/stats", response_model=ReviewStats)
+async def get_review_statistics(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.REVIEWER))
+):
+    """Get review statistics (Reviewer/Admin only)"""
+    stats = override_crud.get_review_stats(db)
+    
+    return ReviewStats(
+        total_pending_reviews=stats["total_pending_reviews"],
+        total_insufficient_answers=stats["total_insufficient_answers"],
+        total_overrides=stats["total_overrides"],
+        avg_confidence_insufficient=stats["avg_confidence_insufficient"],
+        top_review_flags=stats["top_review_flags"],
+        reviewer_activity=stats["reviewer_activity"]
+    )
+
+# Performance Cache Endpoints
+@app.get("/cache/stats")
+async def get_cache_statistics(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get performance cache statistics"""
+    return override_crud.get_cache_stats(db)
+
+@app.delete("/cache/cleanup")
+async def cleanup_cache(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.ADMIN))
+):
+    """Clean up expired cache entries (Admin only)"""
+    expired_count = override_crud.cleanup_expired_cache(db)
+    return {"message": f"Cleaned up {expired_count} expired cache entries"}
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
