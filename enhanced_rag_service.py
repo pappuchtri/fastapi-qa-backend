@@ -168,7 +168,7 @@ Provide only the JSON response, no additional text."""
         
         # Strategy 1: Vector similarity search (with very low threshold)
         print("\n🔍 Strategy 1: Vector Similarity Search")
-        vector_chunks = await self._comprehensive_vector_search(db, query_embedding)
+        vector_chunks = await self._comprehensive_vector_search(db, query_embedding, limit=15)
         if vector_chunks:
             print(f"✅ Found {len(vector_chunks)} chunks via vector search")
             all_relevant_chunks.extend(vector_chunks)
@@ -224,7 +224,8 @@ Provide only the JSON response, no additional text."""
     async def _comprehensive_vector_search(
         self, 
         db: Session, 
-        query_embedding: np.ndarray
+        query_embedding: np.ndarray,
+        limit: int = 10
     ) -> List[Dict[str, Any]]:
         """Comprehensive vector-based similarity search with very low threshold"""
         try:
@@ -247,7 +248,7 @@ Provide only the JSON response, no additional text."""
                             )
                             
                             # Very low threshold to catch any potentially relevant content
-                            if similarity >= self.document_similarity_threshold:
+                            if similarity >= 0.2:  # Even lower threshold for maximum recall
                                 similarities.append({
                                     "chunk_id": chunk.id,
                                     "document_id": chunk.document_id,
@@ -261,7 +262,7 @@ Provide only the JSON response, no additional text."""
                     continue
             
             similarities.sort(key=lambda x: x["similarity"], reverse=True)
-            return similarities
+            return similarities[:limit]
             
         except Exception as e:
             print(f"⚠️ Error in vector search: {str(e)}")
@@ -491,12 +492,48 @@ Provide only the JSON response, no additional text."""
             print(f"⚠️ Error in document sampling: {str(e)}")
             return []
     
+    def _consolidate_related_chunks(self, chunks: List[Dict[str, Any]], question: str) -> List[Dict[str, Any]]:
+        """
+        Consolidate chunks from the same document/page that might contain related information
+        """
+        # Group chunks by document and page
+        grouped_chunks = {}
+        for chunk in chunks:
+            key = f"{chunk['document_id']}_{chunk.get('page_number', 0)}"
+            if key not in grouped_chunks:
+                grouped_chunks[key] = []
+            grouped_chunks[key].append(chunk)
+        
+        # For each group, if there are multiple chunks, combine them
+        consolidated = []
+        for key, chunk_group in grouped_chunks.items():
+            if len(chunk_group) > 1:
+                # Sort by chunk index if available
+                chunk_group.sort(key=lambda x: x.get('chunk_index', 0))
+                
+                # Combine content
+                combined_content = "\n\n".join([c['content'] for c in chunk_group])
+                
+                # Use the highest similarity score
+                max_similarity = max([c['similarity'] for c in chunk_group])
+                
+                # Create consolidated chunk
+                consolidated_chunk = chunk_group[0].copy()
+                consolidated_chunk['content'] = combined_content
+                consolidated_chunk['similarity'] = max_similarity
+                consolidated_chunk['search_method'] = 'consolidated'
+                consolidated.append(consolidated_chunk)
+            else:
+                consolidated.extend(chunk_group)
+        
+        return consolidated
+    
     def _deduplicate_and_rank_chunks(
         self, 
         chunks: List[Dict[str, Any]], 
         query_embedding: np.ndarray
     ) -> List[Dict[str, Any]]:
-        """Remove duplicates and rank chunks by relevance"""
+        """Remove duplicates, consolidate related chunks, and rank by relevance"""
         seen_chunks = set()
         unique_chunks = []
         
@@ -506,10 +543,13 @@ Provide only the JSON response, no additional text."""
                 seen_chunks.add(chunk_id)
                 unique_chunks.append(chunk)
         
-        # Sort by similarity score, then by search method priority
-        method_priority = {"vector": 5, "entity": 4, "keyword_combo": 3, "keyword": 2, "fuzzy": 1, "sample": 0}
+        # Consolidate related chunks from same document/page
+        consolidated_chunks = self._consolidate_related_chunks(unique_chunks, "")
         
-        unique_chunks.sort(
+        # Sort by similarity score, then by search method priority
+        method_priority = {"consolidated": 6, "vector": 5, "entity": 4, "keyword_combo": 3, "keyword": 2, "fuzzy": 1, "sample": 0}
+        
+        consolidated_chunks.sort(
             key=lambda x: (
                 x["similarity"], 
                 method_priority.get(x["search_method"], 0)
@@ -517,7 +557,7 @@ Provide only the JSON response, no additional text."""
             reverse=True
         )
         
-        return unique_chunks
+        return consolidated_chunks
     
     async def search_historical_qa(
         self, 
@@ -671,19 +711,26 @@ Provide only the JSON response, no additional text."""
     
         system_prompt = """You are an AI assistant specializing in document analysis. Your primary task is to answer questions based EXCLUSIVELY on the provided document context. 
 
-IMPORTANT INSTRUCTIONS:
+CRITICAL INSTRUCTIONS:
 1. Base your answer ONLY on the information provided in the document context
-2. Include specific references to source documents and page numbers
-3. If the documents don't contain enough information to fully answer the question, clearly state what information is missing
-4. Do not add information from your general knowledge that isn't in the documents
-5. Be comprehensive and detailed in your response"""
+2. Include ALL relevant information from the document context - do not summarize or omit details
+3. If multiple locations, entities, or items are mentioned, list ALL of them completely
+4. Include specific references to source documents and page numbers
+5. If the documents don't contain enough information to fully answer the question, clearly state what information is missing
+6. Do not add information from your general knowledge that isn't in the documents
+7. Be comprehensive and detailed - err on the side of including too much rather than too little information
+8. When listing items (like locations, features, etc.), ensure you include the complete list from the source"""
 
         user_prompt = f"""QUESTION: {question}
 
 DOCUMENT CONTEXT FROM UPLOADED PDFs:
 {doc_context_text}
 
-Please provide a comprehensive answer based EXCLUSIVELY on the document context above. Include specific references to the source documents and page numbers. If the documents don't fully address the question, clearly state what information is available and what is missing."""
+Please provide a COMPLETE and COMPREHENSIVE answer based EXCLUSIVELY on the document context above. 
+
+IMPORTANT: If the question asks for a list (like locations, offices, features, etc.), make sure to include ALL items mentioned in the document context. Do not summarize or omit any relevant details.
+
+Include specific references to the source documents and page numbers. If the documents don't fully address the question, clearly state what information is available and what is missing."""
 
         try:
             import openai
