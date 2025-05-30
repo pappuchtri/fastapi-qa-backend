@@ -1,15 +1,30 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, and_, or_
-from typing import List, Optional
-from override_models import User, AnswerOverride, AnswerReview, PerformanceCache, UserRole, ReviewStatus, OverrideStatus
-from override_schemas import UserCreate, OverrideCreate, ReviewCreate
-from models import Question, Answer
+from sqlalchemy import func, text, desc, and_, or_
 from datetime import datetime, timedelta
 import hashlib
+from typing import List, Dict, Any, Optional
 
-# User management
+from override_models import (
+    User, UserRole, AnswerOverride, OverrideStatus, 
+    AnswerReview, ReviewStatus, PerformanceCache,
+    ChunkUsageLog, ReviewTag, ReviewTagAssociation
+)
+from override_schemas import UserCreate, OverrideCreate, ReviewCreate
+
+# User CRUD operations
+def get_user(db: Session, user_id: int) -> Optional[User]:
+    return db.query(User).filter(User.id == user_id).first()
+
+def get_user_by_username(db: Session, username: str) -> Optional[User]:
+    return db.query(User).filter(User.username == username).first()
+
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    return db.query(User).filter(User.email == email).first()
+
+def get_users(db: Session, skip: int = 0, limit: int = 100) -> List[User]:
+    return db.query(User).offset(skip).limit(limit).all()
+
 def create_user(db: Session, user: UserCreate) -> User:
-    """Create a new user"""
     db_user = User(
         username=user.username,
         email=user.email,
@@ -20,27 +35,20 @@ def create_user(db: Session, user: UserCreate) -> User:
     db.refresh(db_user)
     return db_user
 
-def get_user_by_username(db: Session, username: str) -> Optional[User]:
-    """Get user by username"""
-    return db.query(User).filter(User.username == username).first()
+def update_user_role(db: Session, user_id: int, role: UserRole) -> Optional[User]:
+    db_user = db.query(User).filter(User.id == user_id).first()
+    if db_user:
+        db_user.role = role
+        db.commit()
+        db.refresh(db_user)
+    return db_user
 
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    """Get user by email"""
-    return db.query(User).filter(User.email == email).first()
-
-def get_users(db: Session, skip: int = 0, limit: int = 100) -> List[User]:
-    """Get list of users"""
-    return db.query(User).offset(skip).limit(limit).all()
-
-# Override management
+# Override CRUD operations
 def create_override(db: Session, override: OverrideCreate, created_by: int) -> AnswerOverride:
-    """Create a new answer override"""
-    # Mark any existing overrides for this question as superseded
+    # First, supersede any existing active overrides
     existing_overrides = db.query(AnswerOverride).filter(
-        and_(
-            AnswerOverride.question_id == override.question_id,
-            AnswerOverride.status == OverrideStatus.ACTIVE
-        )
+        AnswerOverride.question_id == override.question_id,
+        AnswerOverride.status == OverrideStatus.ACTIVE
     ).all()
     
     for existing in existing_overrides:
@@ -52,8 +60,8 @@ def create_override(db: Session, override: OverrideCreate, created_by: int) -> A
         original_answer_id=override.original_answer_id,
         override_text=override.override_text,
         reason=override.reason,
-        created_by=created_by,
-        status=OverrideStatus.ACTIVE
+        status=OverrideStatus.ACTIVE,
+        created_by=created_by
     )
     
     db.add(db_override)
@@ -61,22 +69,28 @@ def create_override(db: Session, override: OverrideCreate, created_by: int) -> A
     db.refresh(db_override)
     return db_override
 
+def get_override(db: Session, override_id: int) -> Optional[AnswerOverride]:
+    return db.query(AnswerOverride).filter(AnswerOverride.id == override_id).first()
+
 def get_active_override(db: Session, question_id: int) -> Optional[AnswerOverride]:
-    """Get active override for a question"""
     return db.query(AnswerOverride).filter(
-        and_(
-            AnswerOverride.question_id == question_id,
-            AnswerOverride.status == OverrideStatus.ACTIVE
-        )
+        AnswerOverride.question_id == question_id,
+        AnswerOverride.status == OverrideStatus.ACTIVE
     ).first()
 
 def get_overrides(db: Session, skip: int = 0, limit: int = 100) -> List[AnswerOverride]:
-    """Get list of overrides"""
     return db.query(AnswerOverride).order_by(desc(AnswerOverride.created_at)).offset(skip).limit(limit).all()
 
-# Review management
+def revoke_override(db: Session, override_id: int) -> Optional[AnswerOverride]:
+    db_override = db.query(AnswerOverride).filter(AnswerOverride.id == override_id).first()
+    if db_override:
+        db_override.status = OverrideStatus.REVOKED
+        db.commit()
+        db.refresh(db_override)
+    return db_override
+
+# Review CRUD operations
 def create_review(db: Session, review: ReviewCreate, reviewer_id: int) -> AnswerReview:
-    """Create a new answer review"""
     db_review = AnswerReview(
         question_id=review.question_id,
         answer_id=review.answer_id,
@@ -95,40 +109,42 @@ def create_review(db: Session, review: ReviewCreate, reviewer_id: int) -> Answer
     db.refresh(db_review)
     return db_review
 
-def get_pending_reviews(db: Session, skip: int = 0, limit: int = 50) -> List[dict]:
-    """Get pending reviews with question and answer details"""
-    from sqlalchemy import text
-    
+def get_review(db: Session, review_id: int) -> Optional[AnswerReview]:
+    return db.query(AnswerReview).filter(AnswerReview.id == review_id).first()
+
+def get_reviews_for_answer(db: Session, answer_id: int) -> List[AnswerReview]:
+    return db.query(AnswerReview).filter(AnswerReview.answer_id == answer_id).all()
+
+def get_pending_reviews(db: Session, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
+    # Get questions with low confidence or other flags that need review
     query = text("""
         SELECT 
-            q.id as question_id,
+            q.id as question_id, 
             q.text as question_text,
-            a.id as answer_id,
+            a.id as answer_id, 
             a.text as answer_text,
             a.confidence_score,
             a.created_at,
-            COUNT(ar.id) as review_count,
-            CASE 
-                WHEN a.confidence_score < 0.8 THEN 1.0
-                WHEN a.confidence_score < 0.9 THEN 0.7
-                ELSE 0.3
-            END as priority_score,
-            EXISTS(SELECT 1 FROM answer_overrides ao WHERE ao.question_id = q.id AND ao.status = 'active') as has_override
-        FROM questions q
-        JOIN answers a ON q.id = a.question_id
-        LEFT JOIN answer_reviews ar ON a.id = ar.answer_id
-        WHERE a.id = (
-            SELECT id FROM answers a2 
-            WHERE a2.question_id = q.id 
-            ORDER BY a2.created_at DESC 
-            LIMIT 1
-        )
-        AND (
-            a.confidence_score < 0.9 
-            OR EXISTS(SELECT 1 FROM answer_reviews ar2 WHERE ar2.answer_id = a.id AND ar2.is_insufficient = true)
-        )
-        GROUP BY q.id, q.text, a.id, a.text, a.confidence_score, a.created_at
-        ORDER BY priority_score DESC, a.created_at DESC
+            (SELECT COUNT(*) FROM answer_reviews ar WHERE ar.answer_id = a.id) as review_count,
+            EXISTS(SELECT 1 FROM answer_overrides ao WHERE ao.question_id = q.id AND ao.status = 'active') as has_override,
+            -- Priority score calculation: lower confidence = higher priority
+            (1 - a.confidence_score) * 10 + 
+            (CASE WHEN a.confidence_score < 0.7 THEN 5 ELSE 0 END) +
+            (CASE WHEN review_count = 0 THEN 3 ELSE 0 END) as priority_score
+        FROM 
+            questions q
+        JOIN 
+            answers a ON q.id = a.question_id
+        WHERE
+            a.id = (SELECT id FROM answers WHERE question_id = q.id ORDER BY created_at DESC LIMIT 1)
+            AND a.confidence_score < 0.9
+            AND NOT EXISTS (
+                SELECT 1 FROM answer_reviews ar 
+                WHERE ar.answer_id = a.id 
+                AND ar.review_status IN ('approved', 'rejected')
+            )
+        ORDER BY 
+            priority_score DESC, a.created_at DESC
         LIMIT :limit OFFSET :skip
     """)
     
@@ -137,39 +153,42 @@ def get_pending_reviews(db: Session, skip: int = 0, limit: int = 50) -> List[dic
     reviews = []
     for row in result:
         reviews.append({
-            "question_id": row[0],
-            "question_text": row[1],
-            "answer_id": row[2],
-            "answer_text": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
-            "confidence_score": float(row[4]),
-            "created_at": row[5],
-            "review_count": row[6],
-            "priority_score": float(row[7]),
-            "has_override": row[8]
+            "question_id": row.question_id,
+            "question_text": row.question_text,
+            "answer_id": row.answer_id,
+            "answer_text": row.answer_text,
+            "confidence_score": float(row.confidence_score),
+            "created_at": row.created_at,
+            "review_count": row.review_count,
+            "has_override": row.has_override,
+            "priority_score": float(row.priority_score)
         })
     
     return reviews
 
-def get_insufficient_answers(db: Session, skip: int = 0, limit: int = 50) -> List[dict]:
-    """Get answers marked as insufficient"""
-    from sqlalchemy import text
-    
+def get_insufficient_answers(db: Session, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
     query = text("""
-        SELECT DISTINCT
-            q.id as question_id,
+        SELECT 
+            q.id as question_id, 
             q.text as question_text,
-            a.id as answer_id,
+            a.id as answer_id, 
             a.text as answer_text,
             a.confidence_score,
             ar.review_notes,
             ar.reviewed_at,
             u.username as reviewer_name
-        FROM questions q
-        JOIN answers a ON q.id = a.question_id
-        JOIN answer_reviews ar ON a.id = ar.answer_id
-        JOIN users u ON ar.reviewer_id = u.id
-        WHERE ar.is_insufficient = true
-        ORDER BY ar.reviewed_at DESC
+        FROM 
+            answer_reviews ar
+        JOIN 
+            answers a ON ar.answer_id = a.id
+        JOIN 
+            questions q ON ar.question_id = q.id
+        JOIN
+            users u ON ar.reviewer_id = u.id
+        WHERE
+            ar.is_insufficient = TRUE
+        ORDER BY 
+            ar.reviewed_at DESC
         LIMIT :limit OFFSET :skip
     """)
     
@@ -178,132 +197,346 @@ def get_insufficient_answers(db: Session, skip: int = 0, limit: int = 50) -> Lis
     insufficient = []
     for row in result:
         insufficient.append({
-            "question_id": row[0],
-            "question_text": row[1],
-            "answer_id": row[2],
-            "answer_text": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
-            "confidence_score": float(row[4]),
-            "review_notes": row[5],
-            "reviewed_at": row[6],
-            "reviewer_name": row[7]
+            "question_id": row.question_id,
+            "question_text": row.question_text,
+            "answer_id": row.answer_id,
+            "answer_text": row.answer_text,
+            "confidence_score": float(row.confidence_score),
+            "review_notes": row.review_notes,
+            "reviewed_at": row.reviewed_at,
+            "reviewer_name": row.reviewer_name
         })
     
     return insufficient
 
-def get_review_stats(db: Session) -> dict:
-    """Get review statistics"""
-    from sqlalchemy import text, func
+def get_review_stats(db: Session) -> Dict[str, Any]:
+    # Get total pending reviews
+    pending_reviews = db.query(func.count(AnswerReview.id)).filter(
+        AnswerReview.review_status == ReviewStatus.PENDING
+    ).scalar()
     
-    # Get basic counts
-    total_pending = db.query(Answer).filter(Answer.confidence_score < 0.9).count()
-    total_insufficient = db.query(AnswerReview).filter(AnswerReview.is_insufficient == True).count()
-    total_overrides = db.query(AnswerOverride).filter(AnswerOverride.status == OverrideStatus.ACTIVE).count()
-    
-    # Get average confidence for insufficient answers
-    avg_confidence_result = db.query(func.avg(Answer.confidence_score)).join(AnswerReview).filter(
+    # Get total insufficient answers
+    insufficient_answers = db.query(func.count(AnswerReview.id)).filter(
         AnswerReview.is_insufficient == True
     ).scalar()
-    avg_confidence_insufficient = float(avg_confidence_result) if avg_confidence_result else 0.0
+    
+    # Get total overrides
+    total_overrides = db.query(func.count(AnswerOverride.id)).scalar()
+    
+    # Get average confidence of insufficient answers
+    avg_confidence = db.query(func.avg(AnswerReview.confidence_score)).filter(
+        AnswerReview.is_insufficient == True
+    ).scalar() or 0.0
     
     # Get top review flags
-    flag_counts = db.execute(text("""
+    flags_query = text("""
         SELECT 
-            'insufficient' as flag_type, COUNT(*) as count FROM answer_reviews WHERE is_insufficient = true
-        UNION ALL
-        SELECT 
-            'needs_more_context' as flag_type, COUNT(*) as count FROM answer_reviews WHERE needs_more_context = true
-        UNION ALL
-        SELECT 
-            'factual_accuracy_concern' as flag_type, COUNT(*) as count FROM answer_reviews WHERE factual_accuracy_concern = true
-        UNION ALL
-        SELECT 
-            'compliance_concern' as flag_type, COUNT(*) as count FROM answer_reviews WHERE compliance_concern = true
-        ORDER BY count DESC
-    """)).fetchall()
+            CASE 
+                WHEN is_insufficient THEN 'insufficient'
+                WHEN needs_more_context THEN 'needs_context'
+                WHEN factual_accuracy_concern THEN 'factual_concern'
+                WHEN compliance_concern THEN 'compliance_concern'
+                ELSE 'other'
+            END as flag_type,
+            COUNT(*) as count
+        FROM 
+            answer_reviews
+        WHERE
+            is_insufficient OR needs_more_context OR 
+            factual_accuracy_concern OR compliance_concern
+        GROUP BY 
+            flag_type
+        ORDER BY 
+            count DESC
+        LIMIT 5
+    """)
     
-    top_flags = [{"flag": row[0], "count": row[1]} for row in flag_counts]
+    flags_result = db.execute(flags_query)
+    top_flags = [{"flag": row.flag_type, "count": row.count} for row in flags_result]
     
     # Get reviewer activity
-    reviewer_activity = db.execute(text("""
+    activity_query = text("""
         SELECT 
             u.username,
-            COUNT(ar.id) as total_reviews,
-            COUNT(CASE WHEN ar.review_status = 'approved' THEN 1 END) as approved,
-            COUNT(CASE WHEN ar.is_insufficient THEN 1 END) as insufficient_flagged
-        FROM users u
-        LEFT JOIN answer_reviews ar ON u.id = ar.reviewer_id
-        WHERE u.role IN ('reviewer', 'admin')
-        GROUP BY u.id, u.username
-        ORDER BY total_reviews DESC
-        LIMIT 10
-    """)).fetchall()
+            COUNT(*) as review_count,
+            MAX(ar.reviewed_at) as last_activity
+        FROM 
+            answer_reviews ar
+        JOIN
+            users u ON ar.reviewer_id = u.id
+        GROUP BY 
+            u.username
+        ORDER BY 
+            review_count DESC
+        LIMIT 5
+    """)
     
-    reviewer_stats = [
+    activity_result = db.execute(activity_query)
+    reviewer_activity = [
         {
-            "username": row[0],
-            "total_reviews": row[1],
-            "approved": row[2],
-            "insufficient_flagged": row[3]
-        }
-        for row in reviewer_activity
+            "reviewer": row.username, 
+            "review_count": row.review_count,
+            "last_activity": row.last_activity
+        } 
+        for row in activity_result
     ]
     
     return {
-        "total_pending_reviews": total_pending,
-        "total_insufficient_answers": total_insufficient,
-        "total_overrides": total_overrides,
-        "avg_confidence_insufficient": avg_confidence_insufficient,
+        "total_pending_reviews": pending_reviews or 0,
+        "total_insufficient_answers": insufficient_answers or 0,
+        "total_overrides": total_overrides or 0,
+        "avg_confidence_insufficient": float(avg_confidence),
         "top_review_flags": top_flags,
-        "reviewer_activity": reviewer_stats
+        "reviewer_activity": reviewer_activity
     }
 
-# Performance cache management
-def get_cache_stats(db: Session) -> dict:
-    """Get performance cache statistics"""
-    from sqlalchemy import func
+# Performance Cache CRUD operations
+def check_performance_cache(db: Session, question_text: str) -> Optional[Dict[str, Any]]:
+    # Create hash of question for lookup
+    question_hash = hashlib.md5(question_text.encode()).hexdigest()
     
-    total_cached = db.query(PerformanceCache).count()
+    # Look up in cache
+    cache_entry = db.query(PerformanceCache).filter(
+        PerformanceCache.question_hash == question_hash,
+        or_(
+            PerformanceCache.expires_at.is_(None),
+            PerformanceCache.expires_at > datetime.utcnow()
+        )
+    ).first()
+    
+    if cache_entry:
+        # Update access time and hit count
+        cache_entry.last_accessed = datetime.utcnow()
+        cache_entry.cache_hits += 1
+        db.commit()
+        
+        return {
+            "answer": cache_entry.cached_answer,
+            "confidence": float(cache_entry.confidence_score),
+            "source_type": cache_entry.source_type,
+            "generation_time_ms": cache_entry.generation_time_ms,
+            "cache_hits": cache_entry.cache_hits
+        }
+    
+    return None
+
+def store_performance_cache(
+    db: Session, 
+    question_text: str, 
+    answer_text: str, 
+    generation_time_ms: int,
+    confidence_score: float,
+    source_type: str,
+    expire_hours: int = 24
+) -> PerformanceCache:
+    # Only cache if generation was slow (> 3 seconds)
+    if generation_time_ms < 3000:
+        return None
+        
+    # Create hash of question
+    question_hash = hashlib.md5(question_text.encode()).hexdigest()
+    
+    # Check if already exists
+    existing = db.query(PerformanceCache).filter(
+        PerformanceCache.question_hash == question_hash
+    ).first()
+    
+    if existing:
+        # Update existing entry
+        existing.cached_answer = answer_text
+        existing.generation_time_ms = generation_time_ms
+        existing.confidence_score = confidence_score
+        existing.source_type = source_type
+        existing.last_accessed = datetime.utcnow()
+        existing.expires_at = datetime.utcnow() + timedelta(hours=expire_hours)
+        db.commit()
+        return existing
+    
+    # Create new cache entry
+    cache_entry = PerformanceCache(
+        question_hash=question_hash,
+        question_text=question_text,
+        cached_answer=answer_text,
+        generation_time_ms=generation_time_ms,
+        confidence_score=confidence_score,
+        source_type=source_type,
+        expires_at=datetime.utcnow() + timedelta(hours=expire_hours)
+    )
+    
+    db.add(cache_entry)
+    db.commit()
+    db.refresh(cache_entry)
+    return cache_entry
+
+def get_cache_stats(db: Session) -> Dict[str, Any]:
+    # Get total cache entries
+    total_entries = db.query(func.count(PerformanceCache.id)).scalar() or 0
+    
+    # Get active cache entries
+    active_entries = db.query(func.count(PerformanceCache.id)).filter(
+        or_(
+            PerformanceCache.expires_at.is_(None),
+            PerformanceCache.expires_at > datetime.utcnow()
+        )
+    ).scalar() or 0
+    
+    # Get expired cache entries
+    expired_entries = db.query(func.count(PerformanceCache.id)).filter(
+        PerformanceCache.expires_at <= datetime.utcnow()
+    ).scalar() or 0
+    
+    # Get total cache hits
     total_hits = db.query(func.sum(PerformanceCache.cache_hits)).scalar() or 0
+    
+    # Get average generation time
     avg_generation_time = db.query(func.avg(PerformanceCache.generation_time_ms)).scalar() or 0
     
-    # Get cache hit rate by source type
-    cache_by_source = db.execute(text("""
+    # Get cache by source type
+    source_query = text("""
         SELECT 
             source_type,
-            COUNT(*) as cached_count,
-            SUM(cache_hits) as total_hits,
-            AVG(generation_time_ms) as avg_generation_time
-        FROM performance_cache
-        GROUP BY source_type
-        ORDER BY cached_count DESC
-    """)).fetchall()
+            COUNT(*) as count,
+            AVG(generation_time_ms) as avg_time
+        FROM 
+            performance_cache
+        GROUP BY 
+            source_type
+    """)
     
+    source_result = db.execute(source_query)
     source_stats = [
         {
-            "source_type": row[0],
-            "cached_count": row[1],
-            "total_hits": row[2],
-            "avg_generation_time": row[3]
-        }
-        for row in cache_by_source
+            "source_type": row.source_type, 
+            "count": row.count,
+            "avg_generation_time_ms": float(row.avg_time)
+        } 
+        for row in source_result
+    ]
+    
+    # Get most frequently accessed cache entries
+    top_query = text("""
+        SELECT 
+            question_text,
+            cache_hits,
+            generation_time_ms,
+            created_at
+        FROM 
+            performance_cache
+        ORDER BY 
+            cache_hits DESC
+        LIMIT 5
+    """)
+    
+    top_result = db.execute(top_query)
+    top_entries = [
+        {
+            "question": row.question_text[:50] + "..." if len(row.question_text) > 50 else row.question_text,
+            "hits": row.cache_hits,
+            "generation_time_ms": row.generation_time_ms,
+            "created_at": row.created_at
+        } 
+        for row in top_result
     ]
     
     return {
-        "total_cached_answers": total_cached,
-        "total_cache_hits": total_hits,
-        "avg_generation_time_ms": avg_generation_time,
-        "cache_by_source": source_stats
+        "total_entries": total_entries,
+        "active_entries": active_entries,
+        "expired_entries": expired_entries,
+        "total_hits": total_hits,
+        "avg_generation_time_ms": float(avg_generation_time),
+        "source_stats": source_stats,
+        "top_entries": top_entries
     }
 
 def cleanup_expired_cache(db: Session) -> int:
-    """Clean up expired cache entries"""
-    expired_count = db.query(PerformanceCache).filter(
-        PerformanceCache.expires_at < datetime.utcnow()
-    ).count()
-    
-    db.query(PerformanceCache).filter(
-        PerformanceCache.expires_at < datetime.utcnow()
+    # Delete expired cache entries
+    result = db.query(PerformanceCache).filter(
+        PerformanceCache.expires_at <= datetime.utcnow()
     ).delete()
     
     db.commit()
-    return expired_count
+    return result
+
+# Chunk usage logging
+def log_chunk_usage(
+    db: Session, 
+    question_id: int, 
+    chunk_id: int, 
+    relevance_score: float,
+    position: int,
+    was_used: bool = True
+) -> ChunkUsageLog:
+    log_entry = ChunkUsageLog(
+        question_id=question_id,
+        chunk_id=chunk_id,
+        relevance_score=relevance_score,
+        position_in_results=position,
+        was_used_in_answer=was_used
+    )
+    
+    db.add(log_entry)
+    db.commit()
+    db.refresh(log_entry)
+    return log_entry
+
+def get_chunk_usage_stats(db: Session) -> Dict[str, Any]:
+    # Get total chunks used
+    total_chunks = db.query(func.count(ChunkUsageLog.id)).scalar() or 0
+    
+    # Get average chunks per question
+    avg_chunks_query = text("""
+        SELECT 
+            AVG(chunk_count) as avg_chunks
+        FROM (
+            SELECT 
+                question_id, 
+                COUNT(*) as chunk_count
+            FROM 
+                chunk_usage_log
+            WHERE 
+                was_used_in_answer = TRUE
+            GROUP BY 
+                question_id
+        ) as subquery
+    """)
+    
+    avg_chunks = db.execute(avg_chunks_query).scalar() or 0
+    
+    # Get most frequently used chunks
+    top_chunks_query = text("""
+        SELECT 
+            dc.id as chunk_id,
+            d.original_filename,
+            COUNT(*) as usage_count,
+            AVG(cul.relevance_score) as avg_relevance
+        FROM 
+            chunk_usage_log cul
+        JOIN
+            document_chunks dc ON cul.chunk_id = dc.id
+        JOIN
+            documents d ON dc.document_id = d.id
+        WHERE
+            cul.was_used_in_answer = TRUE
+        GROUP BY 
+            dc.id, d.original_filename
+        ORDER BY 
+            usage_count DESC
+        LIMIT 5
+    """)
+    
+    top_chunks_result = db.execute(top_chunks_query)
+    top_chunks = [
+        {
+            "chunk_id": row.chunk_id,
+            "document": row.original_filename,
+            "usage_count": row.usage_count,
+            "avg_relevance": float(row.avg_relevance)
+        } 
+        for row in top_chunks_result
+    ]
+    
+    return {
+        "total_chunks_used": total_chunks,
+        "avg_chunks_per_question": float(avg_chunks),
+        "top_chunks": top_chunks
+    }
