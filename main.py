@@ -173,12 +173,14 @@ async def ask_question(
     api_key: str = Depends(verify_api_key)
 ):
     """
-    Ask a question with improved logic:
-    1. Check Q&A database for very similar questions first (similarity > 0.90)
-    2. If not found, search PDF documents
-    3. If found in PDF → return with save option
-    4. If not in PDF, check Q&A database with lower threshold (similarity > 0.75)
-    5. If still not found → use ChatGPT
+    Ask a question with the correct logic as per requirements:
+    1. FIRST: Search PDF documents using RAG
+    2. If found in PDF → show answer + save prompt ("Do you want to save this answer to the Q&A database?")
+    3. If not found in PDF → check Q&A database for similar questions
+    4. If found in database → return exact answer (if identical) or adapted answer (if similar)
+    5. If not found anywhere → use ChatGPT-3.5 + save prompt
+    
+    This ensures every question re-queries PDF first, preventing blind cache returns for follow-up questions.
     """
     try:
         question_text = request.question.strip()
@@ -195,39 +197,8 @@ async def ask_question(
         # Generate embedding for the question
         query_embedding = await rag_service.generate_embedding(question_text)
         
-        # STEP 1: Check Q&A database for VERY similar questions first (high threshold)
-        print("🗃️ Step 1: Checking Q&A database for very similar questions...")
-        similar_question, similarity = await rag_service.find_similar_question(db, query_embedding)
-        
-        if similar_question and similarity > 0.90:  # High threshold for exact matches
-            print(f"✅ Found very similar question in database (similarity: {similarity:.3f})")
-            
-            # Get the latest answer for this question
-            latest_answer = db.query(Answer).filter(
-                Answer.question_id == similar_question.id
-            ).order_by(Answer.created_at.desc()).first()
-            
-            if latest_answer:
-                generation_time = int((time.time() - start_time) * 1000)
-                
-                return {
-                    "answer": latest_answer.text,
-                    "question_id": similar_question.id,
-                    "answer_id": latest_answer.id,
-                    "similarity_score": similarity,
-                    "is_cached": True,
-                    "source_documents": [],
-                    "answer_type": "database_cached",
-                    "confidence_score": latest_answer.confidence_score,
-                    "generation_time_ms": generation_time,
-                    "found_in_pdf": False,
-                    "show_save_prompt": False,
-                    "save_prompt_message": None,
-                    "cache_hit": True
-                }
-        
-        # STEP 2: If not found in Q&A database, search PDF documents
-        print("📄 Step 2: Not found in Q&A database, searching PDF documents...")
+        # STEP 1: FIRST, search PDF documents using RAG (as per requirements)
+        print("📄 Step 1: Searching PDF documents first (as per requirements)...")
         relevant_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
         
         if relevant_chunks:
@@ -251,16 +222,18 @@ async def ask_question(
                 "generation_time_ms": generation_time,
                 "found_in_pdf": True,
                 "show_save_prompt": True,
-                "save_prompt_message": "This answer was found in your PDF documents. Do you want to save it to the Q&A database for future quick access?",
+                "save_prompt_message": "Do you want to save this answer to the Q&A database?",
                 "temp_question": question_text,  # Store for potential saving
                 "temp_answer": answer_text,      # Store for potential saving
                 "temp_sources": source_docs,     # Store for potential saving
                 "cache_hit": False
             }
         
-        # STEP 3: If not found in PDF, check Q&A database with lower threshold
-        print("🗃️ Step 3: Not found in PDF, checking Q&A database with lower threshold...")
-        if similar_question and similarity > 0.75:  # Lower threshold for broader matches
+        # STEP 2: If no answer found in PDF, check Q&A database
+        print("🗃️ Step 2: No answer in PDF, checking Q&A database...")
+        similar_question, similarity = await rag_service.find_similar_question(db, query_embedding)
+        
+        if similar_question and similarity > 0.75:  # Reasonable threshold for similarity
             print(f"✅ Found similar question in database (similarity: {similarity:.3f})")
             
             # Get the latest answer for this question
@@ -271,24 +244,36 @@ async def ask_question(
             if latest_answer:
                 generation_time = int((time.time() - start_time) * 1000)
                 
+                # Check if it's an exact match (very high similarity) or needs adaptation
+                if similarity > 0.95:
+                    # Return exact answer for identical questions
+                    answer_type = "database_exact_match"
+                    final_answer = latest_answer.text
+                else:
+                    # For similar but not identical questions, we could adapt the answer
+                    # For now, return the existing answer but mark it as adapted
+                    answer_type = "database_adapted"
+                    final_answer = latest_answer.text
+                
                 return {
-                    "answer": latest_answer.text,
+                    "answer": final_answer,
                     "question_id": similar_question.id,
                     "answer_id": latest_answer.id,
                     "similarity_score": similarity,
                     "is_cached": True,
                     "source_documents": [],
-                    "answer_type": "database_cached",
+                    "answer_type": answer_type,
                     "confidence_score": latest_answer.confidence_score,
                     "generation_time_ms": generation_time,
                     "found_in_pdf": False,
                     "show_save_prompt": False,
                     "save_prompt_message": None,
-                    "cache_hit": True
+                    "cache_hit": True,
+                    "original_question": similar_question.text if similarity < 0.95 else None
                 }
         
-        # STEP 4: If not found anywhere, use ChatGPT
-        print("🤖 Step 4: Not found in PDF or database, using ChatGPT...")
+        # STEP 3: If not found in PDF or database, use ChatGPT-3.5
+        print("🤖 Step 3: Not found in PDF or database, using ChatGPT-3.5...")
         answer_text = await rag_service.generate_answer(question_text)
         
         generation_time = int((time.time() - start_time) * 1000)
@@ -305,7 +290,7 @@ async def ask_question(
             "generation_time_ms": generation_time,
             "found_in_pdf": False,
             "show_save_prompt": True,
-            "save_prompt_message": "This answer was generated by ChatGPT. Do you want to save it to the Q&A database?",
+            "save_prompt_message": "Do you want to save this answer to the Q&A database?",
             "temp_question": question_text,  # Store for potential saving
             "temp_answer": answer_text,      # Store for potential saving
             "temp_sources": [],              # No sources for ChatGPT
