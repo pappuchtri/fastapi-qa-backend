@@ -255,6 +255,81 @@ class RAGService:
             print(f"❌ Error in keyword search: {str(e)}")
             return []
     
+    async def search_documents(self, db: Session, query_embedding: np.ndarray, limit: int = 5) -> List[dict]:
+        """
+        Search documents - wrapper for search_document_chunks for compatibility
+        """
+        return await self.search_document_chunks(db, query_embedding, limit)
+
+    async def generate_answer_from_chunks(self, question: str, relevant_chunks: List[dict]) -> str:
+        """
+        Generate answer from document chunks
+        """
+        if not relevant_chunks:
+            return await self.generate_answer(question)
+        
+        # Create context from chunks
+        context_parts = []
+        source_documents = list(set([chunk.get('filename', 'Unknown') for chunk in relevant_chunks]))
+        
+        for chunk in relevant_chunks:
+            source_info = f"[Source: {chunk.get('filename', 'Unknown')}, Page {chunk.get('page_number', 'N/A')}]"
+            context_parts.append(f"{source_info}\n{chunk.get('content', '')}")
+        
+        context_text = "\n\n".join(context_parts)
+        
+        if not self.openai_configured:
+            return f"""📄 **Answer based on uploaded documents:**
+
+{context_text}
+
+**Sources:** {', '.join(source_documents)}
+
+*Note: This is demo mode. With OpenAI configured, this would be a comprehensive answer based on the document content above.*"""
+        
+        try:
+            print(f"🧠 Generating answer from {len(relevant_chunks)} document chunks...")
+            
+            import openai
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """You are a helpful assistant that answers questions based on the provided document context. 
+                        Always cite the source documents and page numbers when possible. 
+                        Be comprehensive and accurate. Include ALL relevant information from the context.
+                        If the context doesn't contain enough information to fully answer the question, clearly state what information is missing."""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Question: {question}\n\nDocument Context:\n{context_text}\n\nPlease answer the question based on the document context provided. Include specific references to the source documents and page numbers."
+                    }
+                ],
+                max_tokens=800,
+                temperature=0.3
+            )
+            
+            answer = response['choices'][0]['message']['content'].strip()
+            print(f"✅ Answer generated from document chunks ({len(answer)} characters)")
+            return answer
+            
+        except Exception as e:
+            print(f"❌ Error generating answer from chunks: {str(e)}")
+            return f"""Based on the uploaded documents:
+
+{context_text}
+
+**Sources:** {', '.join(source_documents)}
+
+*Note: There was an error generating the AI response, but the relevant document content is shown above.*"""
+
+    async def generate_gpt_answer(self, question: str) -> str:
+        """
+        Generate answer using GPT when no document context is available
+        """
+        return await self.generate_answer(question)
+    
     async def generate_answer(self, question: str) -> str:
         """Generate answer using OpenAI GPT-3.5-turbo"""
         if not self.openai_configured:
