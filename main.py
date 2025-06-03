@@ -772,6 +772,53 @@ async def upload_document(
             detail=f"Error uploading document: {str(e)}"
         )
 
+@app.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Delete a document and all its chunks"""
+    try:
+        print(f"🗑️ Deleting document ID: {document_id}")
+        
+        # Check if document exists
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found"
+            )
+        
+        original_filename = document.original_filename
+        
+        # Delete all chunks for this document (CASCADE should handle this, but let's be explicit)
+        chunks_deleted = db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete()
+        print(f"🗑️ Deleted {chunks_deleted} chunks for document {document_id}")
+        
+        # Delete the document
+        db.delete(document)
+        db.commit()
+        
+        print(f"✅ Successfully deleted document: {original_filename} (ID: {document_id})")
+        
+        return {
+            "message": f"Document '{original_filename}' deleted successfully",
+            "document_id": document_id,
+            "chunks_deleted": chunks_deleted,
+            "deleted_at": datetime.utcnow()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting document {document_id}: {str(e)}")
+        db.rollback()  # Rollback in case of error
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting document: {str(e)}"
+        )
+
 @app.get("/stats")
 async def get_stats(
     db: Session = Depends(get_db),
@@ -886,6 +933,62 @@ async def debug_chunks(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error in debug endpoint: {str(e)}"
         )
+
+@app.get("/debug/documents")
+async def debug_documents(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Debug endpoint to check documents table"""
+    try:
+        # Check table structure
+        table_info = db.execute(text("""
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns 
+            WHERE table_name = 'documents' 
+            ORDER BY ordinal_position
+        """)).fetchall()
+        
+        # Get all documents with raw data
+        documents_raw = db.execute(text("""
+            SELECT id, filename, original_filename, file_size, 
+                   content_type, upload_date, processed, processing_status,
+                   total_pages, total_chunks, error_message
+            FROM documents 
+            ORDER BY id
+        """)).fetchall()
+        
+        # Get document count
+        doc_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
+        
+        return {
+            "table_exists": len(table_info) > 0,
+            "table_columns": [{"name": col[0], "type": col[1], "nullable": col[2]} for col in table_info],
+            "total_documents": doc_count,
+            "documents_raw": [
+                {
+                    "id": row[0],
+                    "filename": row[1],
+                    "original_filename": row[2],
+                    "file_size": row[3],
+                    "content_type": row[4],
+                    "upload_date": str(row[5]) if row[5] else None,
+                    "processed": row[6],
+                    "processing_status": row[7],
+                    "total_pages": row[8],
+                    "total_chunks": row[9],
+                    "error_message": row[10]
+                } for row in documents_raw
+            ],
+            "message": f"Found {doc_count} documents in database"
+        }
+        
+    except Exception as e:
+        return {
+            "error": str(e),
+            "table_exists": False,
+            "message": f"Error debugging documents: {str(e)}"
+        }
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
