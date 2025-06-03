@@ -588,8 +588,29 @@ async def list_documents(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """List all uploaded documents"""
+    """List all uploaded documents with enhanced debugging"""
     try:
+        print("🔍 Fetching documents from database...")
+        
+        # First, check if documents table exists and has data
+        count_result = db.execute(text("SELECT COUNT(*) FROM documents"))
+        total_count = count_result.fetchone()[0]
+        print(f"📊 Total documents in database: {total_count}")
+        
+        if total_count == 0:
+            print("⚠️ No documents found in database")
+            return {
+                "documents": [],
+                "total": 0,
+                "message": "No documents found in database",
+                "debug_info": {
+                    "table_exists": True,
+                    "total_count": 0,
+                    "query_executed": True
+                }
+            }
+        
+        # Fetch documents with detailed logging
         result = db.execute(text("""
             SELECT id, filename, original_filename, file_size, 
                    content_type, upload_date, processed, processing_status,
@@ -600,27 +621,62 @@ async def list_documents(
         
         documents = []
         for row in result:
-            documents.append({
+            doc = {
                 "id": row[0],
                 "filename": row[1],
                 "original_filename": row[2],
                 "file_size": row[3],
                 "content_type": row[4],
-                "upload_date": row[5],
+                "upload_date": row[5].isoformat() if row[5] else None,
                 "processed": row[6],
                 "processing_status": row[7],
                 "total_pages": row[8],
                 "total_chunks": row[9]
-            })
+            }
+            documents.append(doc)
+            print(f"📄 Found document: {doc['original_filename']} (ID: {doc['id']})")
+        
+        print(f"✅ Successfully fetched {len(documents)} documents")
         
         return {
             "documents": documents,
             "total": len(documents),
-            "message": "Documents retrieved successfully"
+            "message": f"Successfully retrieved {len(documents)} documents",
+            "debug_info": {
+                "table_exists": True,
+                "total_count": total_count,
+                "returned_count": len(documents),
+                "query_executed": True
+            }
         }
         
     except Exception as e:
         print(f"❌ Error listing documents: {str(e)}")
+        
+        # Try to provide more debugging info
+        try:
+            # Check if table exists
+            table_check = db.execute(text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'documents'
+            """))
+            table_exists = table_check.fetchone() is not None
+            
+            return {
+                "documents": [],
+                "total": 0,
+                "message": f"Error retrieving documents: {str(e)}",
+                "debug_info": {
+                    "table_exists": table_exists,
+                    "error": str(e),
+                    "query_executed": False
+                }
+            }
+        except:
+            pass
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error listing documents: {str(e)}"
@@ -669,6 +725,8 @@ async def upload_document(
         db.add(document)
         db.commit()
         db.refresh(document)
+        
+        print(f"✅ Document saved to database with ID: {document.id}")
         
         # Process PDF in background
         pdf_processor = SimplePDFProcessor(rag_service)
