@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI app
 app = FastAPI(
     title="Enhanced PDF RAG Q&A API",
-    description="A comprehensive FastAPI backend for PDF document processing and Q&A using RAG",
+    description="A comprehensive FastAPI backend for PDF document processing and Q&A using RAG with user-controlled saving",
     version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -124,29 +124,28 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
 async def root():
     """Root endpoint"""
     return {
-        "message": "Enhanced PDF RAG Q&A API",
+        "message": "Enhanced PDF RAG Q&A API with User-Controlled Saving",
         "version": "3.0.0",
         "status": "running",
+        "logic": "PDF-first search → User-controlled saving → Database fallback → ChatGPT",
         "features": [
-            "PDF document processing",
-            "Vector similarity search",
-            "Historical Q&A integration",
+            "PDF document processing (search first)",
+            "User-controlled answer saving",
+            "Q&A database fallback",
+            "ChatGPT-3.5 generation",
             "Answer feedback system",
-            "Question rephrasing suggestions",
-            "GPT fallback for unknown questions"
+            "Question rephrasing suggestions"
         ],
         "endpoints": {
             "health": "/health",
             "ask": "/ask",
+            "save-answer": "/save-answer",
             "feedback": "/feedback",
             "suggest": "/suggest-questions",
             "documents": "/documents",
             "upload": "/documents/upload",
             "stats": "/stats",
-            "qa-cache": "/qa-cache",
-            "debug/chunks": "/debug/chunks",
-            "reviews": "/reviews",
-            "overrides": "/overrides"
+            "qa-cache": "/qa-cache"
         }
     }
 
@@ -161,19 +160,25 @@ async def health_check(db: Session = Depends(get_db)):
     
     return HealthResponse(
         status="healthy",
-        message="Enhanced RAG API is running",
+        message="Enhanced RAG API is running with PDF-first logic",
         timestamp=datetime.utcnow(),
         database_connected=database_connected,
         openai_configured=rag_service.openai_configured
     )
 
-@app.post("/ask", response_model=QuestionAnswerResponse)
+@app.post("/ask")
 async def ask_question(
     request: QuestionAnswerRequest,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Ask a question with enhanced RAG features"""
+    """
+    Ask a question following the PDF-first logic:
+    1. Search PDF documents first
+    2. If found in PDF → return with save prompt
+    3. If not in PDF → check Q&A database
+    4. If not in database → use ChatGPT
+    """
     try:
         question_text = request.question.strip()
         start_time = time.time()
@@ -184,71 +189,95 @@ async def ask_question(
                 detail="Question cannot be empty"
             )
         
-        print(f"🔍 Processing question: {question_text[:50]}...")
+        print(f"🔍 Processing question with PDF-first logic: {question_text[:50]}...")
         
-        # Generate embedding and process question
+        # Generate embedding for the question
         query_embedding = await rag_service.generate_embedding(question_text)
         
-        # Find similar question
+        # STEP 1: Search PDF documents FIRST
+        print("📄 Step 1: Searching PDF documents...")
+        relevant_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
+        
+        if relevant_chunks:
+            print(f"✅ Found {len(relevant_chunks)} relevant chunks in PDF documents")
+            
+            # Generate answer from PDF content
+            answer_text = await rag_service.generate_answer_from_chunks(question_text, relevant_chunks)
+            source_docs = list(set([chunk.get('filename', 'Unknown') for chunk in relevant_chunks]))
+            
+            generation_time = int((time.time() - start_time) * 1000)
+            
+            return {
+                "answer": answer_text,
+                "question_id": None,  # Not saved yet
+                "answer_id": None,    # Not saved yet
+                "similarity_score": 0.0,
+                "is_cached": False,
+                "source_documents": source_docs,
+                "answer_type": "pdf_document",
+                "confidence_score": 0.9,
+                "generation_time_ms": generation_time,
+                "found_in_pdf": True,
+                "show_save_prompt": True,
+                "save_prompt_message": "This answer was found in your PDF documents. Do you want to save it to the Q&A database for future quick access?",
+                "temp_question": question_text,  # Store for potential saving
+                "temp_answer": answer_text,      # Store for potential saving
+                "temp_sources": source_docs      # Store for potential saving
+            }
+        
+        # STEP 2: If not found in PDF, check Q&A database
+        print("🗃️ Step 2: Not found in PDF, checking Q&A database...")
         similar_question, similarity = await rag_service.find_similar_question(db, query_embedding)
         
         if similar_question and similarity > 0.85:
-            # Use cached answer
+            print(f"✅ Found similar question in database (similarity: {similarity:.3f})")
+            
+            # Get the latest answer for this question
             latest_answer = db.query(Answer).filter(
                 Answer.question_id == similar_question.id
             ).order_by(Answer.created_at.desc()).first()
             
             if latest_answer:
-                print(f"📋 Using cached answer (similarity: {similarity:.3f})")
-                return QuestionAnswerResponse(
-                    answer=latest_answer.text,
-                    question_id=similar_question.id,
-                    answer_id=latest_answer.id,
-                    similarity_score=similarity,
-                    is_cached=True,
-                    source_documents=[]
-                )
+                generation_time = int((time.time() - start_time) * 1000)
+                
+                return {
+                    "answer": latest_answer.text,
+                    "question_id": similar_question.id,
+                    "answer_id": latest_answer.id,
+                    "similarity_score": similarity,
+                    "is_cached": True,
+                    "source_documents": [],
+                    "answer_type": "database_cached",
+                    "confidence_score": latest_answer.confidence_score,
+                    "generation_time_ms": generation_time,
+                    "found_in_pdf": False,
+                    "show_save_prompt": False,
+                    "save_prompt_message": None
+                }
         
-        # Search documents
-        relevant_chunks = await rag_service.search_documents(db, query_embedding, limit=5)
-        
-        if relevant_chunks:
-            # Generate answer from documents
-            answer_text = await rag_service.generate_answer_from_chunks(
-                question_text, relevant_chunks
-            )
-            confidence = 0.9
-            source_docs = [chunk.get('filename', 'Unknown') for chunk in relevant_chunks]
-        else:
-            # Fallback to GPT
-            answer_text = await rag_service.generate_gpt_answer(question_text)
-            confidence = 0.7
-            source_docs = []
-        
-        # Store question and answer
-        new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
-        crud.create_embedding(db, new_question.id, query_embedding)
-        
-        new_answer = crud.create_answer(
-            db, 
-            crud.AnswerCreate(
-                question_id=new_question.id,
-                text=answer_text,
-                confidence_score=confidence
-            )
-        )
+        # STEP 3: If not found anywhere, use ChatGPT
+        print("🤖 Step 3: Not found in PDF or database, using ChatGPT...")
+        answer_text = await rag_service.generate_answer(question_text)
         
         generation_time = int((time.time() - start_time) * 1000)
-        print(f"✅ Generated answer in {generation_time}ms")
         
-        return QuestionAnswerResponse(
-            answer=answer_text,
-            question_id=new_question.id,
-            answer_id=new_answer.id,
-            similarity_score=0.0,
-            is_cached=False,
-            source_documents=source_docs
-        )
+        return {
+            "answer": answer_text,
+            "question_id": None,  # Not saved yet
+            "answer_id": None,    # Not saved yet
+            "similarity_score": 0.0,
+            "is_cached": False,
+            "source_documents": [],
+            "answer_type": "chatgpt_generated",
+            "confidence_score": 0.7,
+            "generation_time_ms": generation_time,
+            "found_in_pdf": False,
+            "show_save_prompt": True,
+            "save_prompt_message": "This answer was generated by ChatGPT. Do you want to save it to the Q&A database?",
+            "temp_question": question_text,  # Store for potential saving
+            "temp_answer": answer_text,      # Store for potential saving
+            "temp_sources": []               # No sources for ChatGPT
+        }
         
     except HTTPException:
         raise
@@ -257,6 +286,66 @@ async def ask_question(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing question: {str(e)}"
+        )
+
+@app.post("/save-answer")
+async def save_answer_to_database(
+    save_request: dict,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Save an answer to the Q&A database when user clicks 'Yes'
+    """
+    try:
+        question_text = save_request.get("question")
+        answer_text = save_request.get("answer")
+        answer_type = save_request.get("answer_type", "user_saved")
+        confidence_score = save_request.get("confidence_score", 0.9)
+        
+        if not question_text or not answer_text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Question and answer are required"
+            )
+        
+        print(f"💾 User chose to save answer for: {question_text[:50]}...")
+        
+        # Generate embedding for the question
+        query_embedding = await rag_service.generate_embedding(question_text)
+        
+        # Create question record
+        new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
+        
+        # Store embedding
+        crud.create_embedding(db, new_question.id, query_embedding)
+        
+        # Create answer record
+        new_answer = crud.create_answer(
+            db, 
+            crud.AnswerCreate(
+                question_id=new_question.id,
+                text=answer_text,
+                confidence_score=confidence_score
+            )
+        )
+        
+        print(f"✅ Answer saved to database: Q{new_question.id}, A{new_answer.id}")
+        
+        return {
+            "message": "Answer saved successfully to Q&A database",
+            "question_id": new_question.id,
+            "answer_id": new_answer.id,
+            "saved_at": datetime.utcnow()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error saving answer: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error saving answer: {str(e)}"
         )
 
 @app.post("/feedback", response_model=FeedbackResponse)
@@ -376,10 +465,7 @@ async def get_review_queue(
                 "needs_review": True
             })
         
-        return {
-            "queue_items": queue_items,
-            "total": len(queue_items)
-        }
+        return queue_items
         
     except Exception as e:
         print(f"❌ Error getting review queue: {str(e)}")
@@ -423,11 +509,7 @@ async def list_overrides(
     """List all overrides"""
     try:
         # Return empty list for now - you can enhance this later
-        return {
-            "overrides": [],
-            "total": 0,
-            "message": "Override listing endpoint ready"
-        }
+        return []
         
     except Exception as e:
         print(f"❌ Error listing overrides: {str(e)}")
@@ -632,7 +714,7 @@ async def get_stats(
             "documents": document_count,
             "chunks": chunk_count,
             "openai_configured": rag_service.openai_configured,
-            "version": "3.0.0 - Enhanced PDF RAG"
+            "version": "3.0.0 - PDF-First Logic with User-Controlled Saving"
         }
         
     except Exception as e:
