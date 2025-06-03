@@ -316,12 +316,20 @@ async def save_answer_to_database(
     Save an answer to the Q&A database when user clicks 'Yes'
     """
     try:
+        print(f"📥 Received save request: {save_request}")
+        
         question_text = save_request.get("question")
         answer_text = save_request.get("answer")
         answer_type = save_request.get("answer_type", "user_saved")
         confidence_score = save_request.get("confidence_score", 0.9)
         
+        print(f"📝 Extracted data - Question: {question_text[:50] if question_text else 'None'}...")
+        print(f"📝 Answer length: {len(answer_text) if answer_text else 0}")
+        print(f"📝 Answer type: {answer_type}")
+        print(f"📝 Confidence: {confidence_score}")
+        
         if not question_text or not answer_text:
+            print("❌ Missing question or answer text")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Question and answer are required"
@@ -330,15 +338,22 @@ async def save_answer_to_database(
         print(f"💾 User chose to save answer for: {question_text[:50]}...")
         
         # Generate embedding for the question
+        print("🔄 Generating embedding...")
         query_embedding = await rag_service.generate_embedding(question_text)
+        print(f"✅ Generated embedding with length: {len(query_embedding) if query_embedding else 0}")
         
         # Create question record
+        print("🔄 Creating question record...")
         new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
+        print(f"✅ Created question with ID: {new_question.id}")
         
         # Store embedding
+        print("🔄 Storing embedding...")
         crud.create_embedding(db, new_question.id, query_embedding)
+        print("✅ Embedding stored successfully")
         
         # Create answer record
+        print("🔄 Creating answer record...")
         new_answer = crud.create_answer(
             db, 
             crud.AnswerCreate(
@@ -347,6 +362,7 @@ async def save_answer_to_database(
                 confidence_score=confidence_score
             )
         )
+        print(f"✅ Created answer with ID: {new_answer.id}")
         
         print(f"✅ Answer saved to database: Q{new_question.id}, A{new_answer.id}")
         
@@ -354,13 +370,18 @@ async def save_answer_to_database(
             "message": "Answer saved successfully to Q&A database",
             "question_id": new_question.id,
             "answer_id": new_answer.id,
-            "saved_at": datetime.utcnow()
+            "saved_at": datetime.utcnow().isoformat(),
+            "success": True
         }
         
-    except HTTPException:
-        raise
+    except HTTPException as he:
+        print(f"❌ HTTP Exception in save-answer: {he.detail}")
+        raise he
     except Exception as e:
-        print(f"❌ Error saving answer: {str(e)}")
+        print(f"❌ Unexpected error saving answer: {str(e)}")
+        print(f"❌ Error type: {type(e).__name__}")
+        import traceback
+        print(f"❌ Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error saving answer: {str(e)}"
