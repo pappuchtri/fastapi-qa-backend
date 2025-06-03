@@ -263,7 +263,7 @@ class RAGService:
 
     async def generate_answer_from_chunks(self, question: str, relevant_chunks: List[dict]) -> str:
         """
-        Generate answer from document chunks
+        Generate answer from document chunks with cleaner output
         """
         if not relevant_chunks:
             return await self.generate_answer(question)
@@ -273,22 +273,20 @@ class RAGService:
         source_documents = list(set([chunk.get('filename', 'Unknown') for chunk in relevant_chunks]))
         
         for chunk in relevant_chunks:
-            source_info = f"[Source: {chunk.get('filename', 'Unknown')}, Page {chunk.get('page_number', 'N/A')}]"
-            context_parts.append(f"{source_info}\n{chunk.get('content', '')}")
+            # Don't include source info in context - we'll show it separately
+            context_parts.append(chunk.get('content', ''))
         
         context_text = "\n\n".join(context_parts)
         
         if not self.openai_configured:
-            return f"""📄 **Answer based on uploaded documents:**
+            return f"""Based on the uploaded documents:
 
 {context_text}
-
-**Sources:** {', '.join(source_documents)}
 
 *Note: This is demo mode. With OpenAI configured, this would be a comprehensive answer based on the document content above.*"""
         
         try:
-            print(f"🧠 Generating answer from {len(relevant_chunks)} document chunks...")
+            print(f"🧠 Generating clean answer from {len(relevant_chunks)} document chunks...")
             
             import openai
             response = openai.ChatCompletion.create(
@@ -296,22 +294,27 @@ class RAGService:
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are a helpful assistant that answers questions based on the provided document context. 
-                        Always cite the source documents and page numbers when possible. 
-                        Be comprehensive and accurate. Include ALL relevant information from the context.
-                        If the context doesn't contain enough information to fully answer the question, clearly state what information is missing."""
+                        "content": """You are a helpful assistant that answers questions based on provided document context. 
+                        
+                        IMPORTANT RULES:
+                        1. Answer the question directly and comprehensively using the document context
+                        2. DO NOT mention the document names or suggest referring to specific documents
+                        3. DO NOT say things like "refer to the document" or "according to the PDF"
+                        4. The source information will be shown separately, so focus only on the answer content
+                        5. Be concise but complete
+                        6. If the context doesn't contain enough information, say so clearly"""
                     },
                     {
                         "role": "user",
-                        "content": f"Question: {question}\n\nDocument Context:\n{context_text}\n\nPlease answer the question based on the document context provided. Include specific references to the source documents and page numbers."
+                        "content": f"Question: {question}\n\nDocument Context:\n{context_text}\n\nPlease answer the question based on the document context provided. Do not mention document names or suggest referring to documents."
                     }
                 ],
-                max_tokens=800,
+                max_tokens=600,
                 temperature=0.3
             )
             
             answer = response['choices'][0]['message']['content'].strip()
-            print(f"✅ Answer generated from document chunks ({len(answer)} characters)")
+            print(f"✅ Clean answer generated from document chunks ({len(answer)} characters)")
             return answer
             
         except Exception as e:
@@ -319,8 +322,6 @@ class RAGService:
             return f"""Based on the uploaded documents:
 
 {context_text}
-
-**Sources:** {', '.join(source_documents)}
 
 *Note: There was an error generating the AI response, but the relevant document content is shown above.*"""
 
@@ -361,7 +362,7 @@ This is a demonstration response. To get AI-powered answers, please configure yo
                 messages=[
                     {
                         "role": "system", 
-                        "content": "You are a helpful assistant that provides accurate, concise, and informative answers. Always be factual and cite sources when possible."
+                        "content": "You are a helpful assistant that provides accurate, concise, and informative answers. Be direct and factual."
                     },
                     {
                         "role": "user", 
@@ -414,10 +415,10 @@ Please try again - GPT-3.5-turbo should be available to all OpenAI accounts."""
             print(f"❌ Error calculating similarity: {str(e)}")
             return 0.0
 
-print("✅ RAG Service initialized with improved document search:")
+print("✅ RAG Service initialized with clean answer generation:")
 print(f"- OpenAI configured: {'Yes' if os.getenv('OPENAI_API_KEY') else 'No (demo mode)'}")
 print("- Model: GPT-3.5-turbo (hardcoded, cost-effective)")
-print("- Using scikit-learn for cosine similarity")
-print("- Similarity threshold: 0.7 (improved for document matching)")
+print("- Clean answers: No document references in response text")
+print("- Source info: Shown separately in UI")
 print("- Embedding dimension: 1536 (text-embedding-ada-002)")
 print("- API format: OpenAI 0.28.1 (stable ChatCompletion API)")
