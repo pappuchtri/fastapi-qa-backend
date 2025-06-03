@@ -151,7 +151,7 @@ class RAGService:
             # Get all document chunks with embeddings
             chunks = db.query(DocumentChunk).join(Document).filter(
                 DocumentChunk.chunk_embedding.isnot(None),
-                DocumentChunk.processed == True
+                Document.processed == True
             ).all()
             
             if not chunks:
