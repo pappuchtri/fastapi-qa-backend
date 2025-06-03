@@ -31,7 +31,6 @@ from schemas import (
 )
 from feedback_schemas import FeedbackCreate, FeedbackResponse, QuestionSuggestion
 from rag_service import RAGService
-import crud
 from simple_pdf_processor import SimplePDFProcessor
 
 # Set up logging
@@ -43,6 +42,38 @@ rag_service = RAGService()
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
+
+# Direct CRUD operations (avoiding import issues)
+def create_question_direct(db: Session, question_text: str) -> Question:
+    """Create a new question directly"""
+    db_question = Question(text=question_text)
+    db.add(db_question)
+    db.commit()
+    db.refresh(db_question)
+    return db_question
+
+def create_answer_direct(db: Session, question_id: int, answer_text: str, confidence_score: float = 0.9) -> Answer:
+    """Create a new answer directly"""
+    db_answer = Answer(
+        question_id=question_id,
+        text=answer_text,
+        confidence_score=confidence_score
+    )
+    db.add(db_answer)
+    db.commit()
+    db.refresh(db_answer)
+    return db_answer
+
+def create_embedding_direct(db: Session, question_id: int, embedding_vector: List[float]) -> Embedding:
+    """Create a new embedding directly"""
+    db_embedding = Embedding(
+        question_id=question_id,
+        embedding=embedding_vector
+    )
+    db.add(db_embedding)
+    db.commit()
+    db.refresh(db_embedding)
+    return db_embedding
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -339,30 +370,52 @@ async def save_answer_to_database(
         
         # Generate embedding for the question
         print("🔄 Generating embedding...")
-        query_embedding = await rag_service.generate_embedding(question_text)
-        print(f"✅ Generated embedding with length: {len(query_embedding) if query_embedding else 0}")
+        try:
+            query_embedding = await rag_service.generate_embedding(question_text)
+            print(f"✅ Generated embedding with length: {len(query_embedding) if query_embedding else 0}")
+        except Exception as e:
+            print(f"❌ Error generating embedding: {str(e)}")
+            # Continue without embedding for now
+            query_embedding = []
         
-        # Create question record
+        # Create question record using direct method
         print("🔄 Creating question record...")
-        new_question = crud.create_question(db, crud.QuestionCreate(text=question_text))
-        print(f"✅ Created question with ID: {new_question.id}")
-        
-        # Store embedding
-        print("🔄 Storing embedding...")
-        crud.create_embedding(db, new_question.id, query_embedding)
-        print("✅ Embedding stored successfully")
-        
-        # Create answer record
-        print("🔄 Creating answer record...")
-        new_answer = crud.create_answer(
-            db, 
-            crud.AnswerCreate(
-                question_id=new_question.id,
-                text=answer_text,
-                confidence_score=confidence_score
+        try:
+            new_question = create_question_direct(db, question_text)
+            print(f"✅ Created question with ID: {new_question.id}")
+        except Exception as e:
+            print(f"❌ Error creating question: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error creating question: {str(e)}"
             )
-        )
-        print(f"✅ Created answer with ID: {new_answer.id}")
+        
+        # Store embedding if we have one
+        if query_embedding:
+            print("🔄 Storing embedding...")
+            try:
+                create_embedding_direct(db, new_question.id, query_embedding)
+                print("✅ Embedding stored successfully")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not store embedding: {str(e)}")
+                # Continue without embedding
+        
+        # Create answer record using direct method
+        print("🔄 Creating answer record...")
+        try:
+            new_answer = create_answer_direct(
+                db, 
+                new_question.id,
+                answer_text,
+                confidence_score
+            )
+            print(f"✅ Created answer with ID: {new_answer.id}")
+        except Exception as e:
+            print(f"❌ Error creating answer: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error creating answer: {str(e)}"
+            )
         
         print(f"✅ Answer saved to database: Q{new_question.id}, A{new_answer.id}")
         
@@ -998,7 +1051,7 @@ async def debug_documents(
                     "processing_status": row[7],
                     "total_pages": row[8],
                     "total_chunks": row[9],
-                    "error_message": row[10]
+                    "error_message": row[10] if len(row) > 10 else None
                 } for row in documents_raw
             ],
             "message": f"Found {doc_count} documents in database"
