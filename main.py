@@ -18,7 +18,7 @@ load_dotenv()
 
 # Import our modules
 from database import SessionLocal, engine, get_db, Base
-from models import Question, Answer, Embedding, KnowledgeBase
+from models import Question, Answer, Embedding
 from document_models import Document, DocumentChunk
 from feedback_models import AnswerFeedback
 from knowledge_base_service import knowledge_service
@@ -284,6 +284,7 @@ async def ask_question(
                 "answer_type": "pdf_document",
                 "confidence_score": 0.9,
                 "generation_time_ms": generation_time,
+                "found_in_knowledge_base": False,
                 "found_in_pdf": True,
                 "show_save_prompt": True,
                 "save_prompt_message": "Do you want to save this answer to the Q&A database?",
@@ -362,21 +363,26 @@ async def ask_question(
         )
 
 @app.post("/save-answer")
-async def save_answer_to_knowledge_base(
+async def save_answer_to_database(
     save_request: dict,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
     """
-    Save an answer ONLY to the knowledge base (NOT Q&A database)
+    Save an answer to the Q&A database when user clicks 'Yes'
     """
     try:
-        print(f"🔥 SAVE-ANSWER ENDPOINT CALLED - KNOWLEDGE BASE ONLY")
-        print(f"📥 Full save request: {save_request}")
+        print(f"📥 Received save request: {save_request}")
         
         question_text = save_request.get("question")
         answer_text = save_request.get("answer")
         answer_type = save_request.get("answer_type", "user_saved")
+        confidence_score = save_request.get("confidence_score", 0.9)
+        
+        print(f"📝 Extracted data - Question: {question_text[:50] if question_text else 'None'}...")
+        print(f"📝 Answer length: {len(answer_text) if answer_text else 0}")
+        print(f"📝 Answer type: {answer_type}")
+        print(f"📝 Confidence: {confidence_score}")
         
         if not question_text or not answer_text:
             print("❌ Missing question or answer text")
@@ -385,144 +391,79 @@ async def save_answer_to_knowledge_base(
                 detail="Question and answer are required"
             )
         
-        print(f"🎯 SAVING TO KNOWLEDGE BASE ONLY (NO Q&A DATABASE)")
-        print(f"📝 Question: {question_text[:100]}...")
-        print(f"📝 Answer: {answer_text[:100]}...")
+        print(f"💾 User chose to save answer for: {question_text[:50]}...")
         
-        # Determine category
-        category = "User Generated"
-        if answer_type == "pdf_document":
-            category = "Document Based"
-        elif answer_type == "chatgpt_generated":
-            category = "AI Generated"
-        
-        # Extract keywords
-        question_words = question_text.lower().split()
-        stop_words = {"what", "how", "why", "when", "where", "is", "are", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by"}
-        keywords = [word.strip(".,!?;:") for word in question_words if word.lower() not in stop_words and len(word) > 2]
-        
-        # Create knowledge base entry directly in database (bypass service for debugging)
-        print("🚀 CREATING KNOWLEDGE BASE ENTRY DIRECTLY...")
-        
+        # Generate embedding for the question
+        print("🔄 Generating embedding...")
         try:
-            # Create the knowledge base entry directly
-            kb_entry = KnowledgeBase(
-                category=category,
-                question=question_text,
-                answer=answer_text,
-                keywords=keywords[:10],
-                priority=5,
-                is_active=True,
-                created_by="user_save"
-            )
-            
-            db.add(kb_entry)
-            db.commit()
-            db.refresh(kb_entry)
-            
-            print(f"✅ SUCCESS! Knowledge base entry created with ID: {kb_entry.id}")
-            print(f"✅ Category: {kb_entry.category}")
-            print(f"✅ Keywords: {kb_entry.keywords}")
-            
-            # RETURN KNOWLEDGE BASE FORMAT (NOT Q&A FORMAT)
-            response = {
-                "message": "Answer saved successfully to knowledge base",
-                "knowledge_base_id": kb_entry.id,  # This is the key field
-                "category": kb_entry.category,
-                "keywords": kb_entry.keywords,
-                "priority": kb_entry.priority,
-                "saved_at": datetime.utcnow().isoformat(),
-                "success": True,
-                "save_location": "knowledge_base"
-            }
-            
-            print(f"🎉 RETURNING KNOWLEDGE BASE RESPONSE: {response}")
-            return response
-            
-        except Exception as kb_error:
-            print(f"💥 KNOWLEDGE BASE SAVE FAILED: {str(kb_error)}")
-            import traceback
-            print(f"💥 Full traceback: {traceback.format_exc()}")
-            
-            # Check if knowledge_base table exists
-            try:
-                table_exists = db.execute(text("""
-                    SELECT table_name 
-                    FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = 'knowledge_base'
-                """)).fetchone()
-                
-                if not table_exists:
-                    print("💥 KNOWLEDGE_BASE TABLE DOES NOT EXIST!")
-                    return {
-                        "error": "knowledge_base table does not exist",
-                        "message": "Please run database migration to create knowledge_base table",
-                        "success": False
-                    }
-                else:
-                    print("✅ knowledge_base table exists")
-                    
-            except Exception as table_check_error:
-                print(f"💥 Error checking table: {table_check_error}")
-            
+            query_embedding = await rag_service.generate_embedding(question_text)
+            print(f"✅ Generated embedding with length: {len(query_embedding) if query_embedding else 0}")
+        except Exception as e:
+            print(f"❌ Error generating embedding: {str(e)}")
+            # Continue without embedding for now
+            query_embedding = []
+        
+        # Create question record using direct method
+        print("🔄 Creating question record...")
+        try:
+            new_question = create_question_direct(db, question_text)
+            print(f"✅ Created question with ID: {new_question.id}")
+        except Exception as e:
+            print(f"❌ Error creating question: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to save to knowledge base: {str(kb_error)}"
+                detail=f"Error creating question: {str(e)}"
             )
         
+        # Store embedding if we have one
+        if query_embedding:
+            print("🔄 Storing embedding...")
+            try:
+                create_embedding_direct(db, new_question.id, query_embedding)
+                print("✅ Embedding stored successfully")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not store embedding: {str(e)}")
+                # Continue without embedding
+        
+        # Create answer record using direct method
+        print("🔄 Creating answer record...")
+        try:
+            new_answer = create_answer_direct(
+                db, 
+                new_question.id,
+                answer_text,
+                confidence_score
+            )
+            print(f"✅ Created answer with ID: {new_answer.id}")
+        except Exception as e:
+            print(f"❌ Error creating answer: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error creating answer: {str(e)}"
+            )
+        
+        print(f"✅ Answer saved to database: Q{new_question.id}, A{new_answer.id}")
+        
+        return {
+            "message": "Answer saved successfully to Q&A database",
+            "question_id": new_question.id,
+            "answer_id": new_answer.id,
+            "saved_at": datetime.utcnow().isoformat(),
+            "success": True
+        }
+        
     except HTTPException as he:
-        print(f"❌ HTTP Exception: {he.detail}")
+        print(f"❌ HTTP Exception in save-answer: {he.detail}")
         raise he
     except Exception as e:
-        print(f"💥 UNEXPECTED ERROR: {str(e)}")
+        print(f"❌ Unexpected error saving answer: {str(e)}")
+        print(f"❌ Error type: {type(e).__name__}")
         import traceback
-        print(f"💥 Traceback: {traceback.format_exc()}")
+        print(f"❌ Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error in save-answer endpoint: {str(e)}"
+            detail=f"Error saving answer: {str(e)}"
         )
-
-@app.post("/debug/save-test")
-async def debug_save_test(
-    save_request: dict,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """Debug endpoint to test knowledge base saving"""
-    try:
-        print(f"🧪 DEBUG SAVE TEST CALLED")
-        print(f"📥 Request: {save_request}")
-        
-        # Test knowledge base creation directly
-        test_entry = KnowledgeBaseCreate(
-            category="Debug Test",
-            question="Test question from debug endpoint",
-            answer="Test answer from debug endpoint",
-            keywords=["test", "debug"],
-            priority=1,
-            is_active=True
-        )
-        
-        print("🧪 Testing knowledge_service.create_knowledge_entry...")
-        new_entry = knowledge_service.create_knowledge_entry(db, test_entry, created_by="debug_test")
-        print(f"✅ Debug test successful! Created KB entry {new_entry.id}")
-        
-        return {
-            "debug_test": "success",
-            "knowledge_base_id": new_entry.id,
-            "message": "Knowledge base save test successful"
-        }
-        
-    except Exception as e:
-        print(f"💥 Debug test failed: {str(e)}")
-        import traceback
-        print(f"💥 Traceback: {traceback.format_exc()}")
-        return {
-            "debug_test": "failed",
-            "error": str(e),
-            "message": "Knowledge base save test failed"
-        }
 
 @app.post("/feedback", response_model=FeedbackResponse)
 async def submit_feedback(
@@ -918,111 +859,400 @@ async def list_documents(
         print("🔍 Fetching documents from database...")
         
         # First, check if documents table exists and has data
-        from models import Document  # Import Document model here
+        count_result = db.execute(text("SELECT COUNT(*) FROM documents"))
+        total_count = count_result.fetchone()[0]
+        print(f"📊 Total documents in database: {total_count}")
         
-        # Check if the documents table exists
-        has_table = engine.dialect.has_table(engine.connect(), Document.__tablename__)
-        if not has_table:
-            print("⚠️ Documents table does not exist.")
-            return {"message": "No documents found - table does not exist", "documents": [], "total": 0}
+        if total_count == 0:
+            print("⚠️ No documents found in database")
+            return {
+                "documents": [],
+                "total": 0,
+                "message": "No documents found in database",
+                "debug_info": {
+                    "table_exists": True,
+                    "total_count": 0,
+                    "query_executed": True
+                }
+            }
         
-        # Get total count of documents
-        total_documents = db.query(Document).count()
+        # Fetch documents with detailed logging
+        result = db.execute(text("""
+            SELECT id, filename, original_filename, file_size, 
+                   content_type, upload_date, processed, processing_status,
+                   total_pages, total_chunks
+            FROM documents 
+            ORDER BY upload_date DESC
+        """))
         
-        if total_documents == 0:
-            print("ℹ️ No documents found in database.")
-            return {"message": "No documents found", "documents": [], "total": 0}
+        documents = []
+        for row in result:
+            doc = {
+                "id": row[0],
+                "filename": row[1],
+                "original_filename": row[2],
+                "file_size": row[3],
+                "content_type": row[4],
+                "upload_date": row[5].isoformat() if row[5] else None,
+                "processed": row[6],
+                "processing_status": row[7],
+                "total_pages": row[8],
+                "total_chunks": row[9]
+            }
+            documents.append(doc)
+            print(f"📄 Found document: {doc['original_filename']} (ID: {doc['id']})")
         
-        # Fetch all documents
-        documents = db.query(Document).all()
-        
-        # Convert documents to a list of dictionaries for easier serialization
-        document_list = [{"id": doc.id, "filename": doc.filename, "upload_date": doc.upload_date} for doc in documents]
-        
-        print(f"✅ Found {len(documents)} documents.")
+        print(f"✅ Successfully fetched {len(documents)} documents")
         
         return {
-            "message": f"Found {len(documents)} documents",
-            "documents": document_list,
-            "total": total_documents
+            "documents": documents,
+            "total": len(documents),
+            "message": f"Successfully retrieved {len(documents)} documents",
+            "debug_info": {
+                "table_exists": True,
+                "total_count": total_count,
+                "returned_count": len(documents),
+                "query_executed": True
+            }
         }
         
     except Exception as e:
         print(f"❌ Error listing documents: {str(e)}")
+        
+        # Try to provide more debugging info
+        try:
+            # Check if table exists
+            table_check = db.execute(text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'documents'
+            """))
+            table_exists = table_check.fetchone() is not None
+            
+            return {
+                "documents": [],
+                "total": 0,
+                "message": f"Error retrieving documents: {str(e)}",
+                "debug_info": {
+                    "table_exists": table_exists,
+                    "error": str(e),
+                    "query_executed": False
+                }
+            }
+        except:
+            pass
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error listing documents: {str(e)}"
         )
 
-@app.get("/debug/knowledge-base-table")
-async def debug_knowledge_base_table(
+@app.post("/documents/upload")
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Debug endpoint to check if knowledge_base table exists and is accessible"""
+    """Upload and process a PDF document"""
     try:
-        print("🔍 Checking knowledge_base table...")
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are supported"
+            )
         
-        # Check if table exists
-        table_exists = db.execute(text("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name = 'knowledge_base'
-        """)).fetchone()
+        # Read file content
+        file_content = await file.read()
         
-        if not table_exists:
-            print("❌ knowledge_base table does not exist")
-            return {
-                "table_exists": False,
-                "error": "knowledge_base table not found",
-                "suggestion": "Run: python scripts/create_knowledge_base_table.py"
-            }
+        if len(file_content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Empty file uploaded"
+            )
         
-        print("✅ knowledge_base table exists")
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
         
-        # Check table structure
-        columns = db.execute(text("""
-            SELECT column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_name = 'knowledge_base'
-            ORDER BY ordinal_position
-        """)).fetchall()
+        print(f"📤 Uploading document: {file.filename} ({len(file_content)} bytes)")
         
-        # Try to count entries
-        count = db.execute(text("SELECT COUNT(*) FROM knowledge_base")).fetchone()[0]
-        
-        # Try to insert a test entry
-        test_entry = KnowledgeBase(
-            category="Debug Test",
-            question="Test question for debugging",
-            answer="Test answer for debugging",
-            keywords=["test", "debug"],
-            priority=1,
-            is_active=True,
-            created_by="debug"
+        # Insert document record
+        document = Document(
+            filename=unique_filename,
+            original_filename=file.filename,
+            file_size=len(file_content),
+            content_type="application/pdf",
+            processing_status="uploaded"
         )
         
-        db.add(test_entry)
+        db.add(document)
         db.commit()
-        db.refresh(test_entry)
+        db.refresh(document)
         
-        print(f"✅ Test entry created with ID: {test_entry.id}")
+        print(f"✅ Document saved to database with ID: {document.id}")
+        
+        # Process PDF in background
+        pdf_processor = SimplePDFProcessor(rag_service)
+        background_tasks.add_task(
+            pdf_processor.process_pdf_content,
+            db,
+            document.id,
+            file_content
+        )
         
         return {
-            "table_exists": True,
-            "columns": [{"name": col[0], "type": col[1]} for col in columns],
-            "entry_count": count,
-            "test_entry_id": test_entry.id,
-            "message": "knowledge_base table is working correctly"
+            "message": "Document uploaded successfully and processing started",
+            "document_id": document.id,
+            "filename": file.filename,
+            "file_size": len(file_content),
+            "processing_status": "uploaded"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error uploading document: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading document: {str(e)}"
+        )
+
+@app.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Delete a document and all its chunks"""
+    try:
+        print(f"🗑️ Deleting document ID: {document_id}")
+        
+        # Check if document exists
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found"
+            )
+        
+        original_filename = document.original_filename
+        
+        # Delete all chunks for this document (CASCADE should handle this, but let's be explicit)
+        chunks_deleted = db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete()
+        print(f"🗑️ Deleted {chunks_deleted} chunks for document {document_id}")
+        
+        # Delete the document
+        db.delete(document)
+        db.commit()
+        
+        print(f"✅ Successfully deleted document: {original_filename} (ID: {document_id})")
+        
+        return {
+            "message": f"Document '{original_filename}' deleted successfully",
+            "document_id": document_id,
+            "chunks_deleted": chunks_deleted,
+            "deleted_at": datetime.utcnow()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting document {document_id}: {str(e)}")
+        db.rollback()  # Rollback in case of error
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting document: {str(e)}"
+        )
+
+@app.get("/stats")
+async def get_stats(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get API statistics including knowledge base"""
+    try:
+        question_count = db.execute(text("SELECT COUNT(*) FROM questions")).fetchone()[0]
+        answer_count = db.execute(text("SELECT COUNT(*) FROM answers")).fetchone()[0]
+        document_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
+        chunk_count = db.execute(text("SELECT COUNT(*) FROM document_chunks")).fetchone()[0]
+        
+        # Get knowledge base stats
+        kb_stats = knowledge_service.get_stats(db)
+        
+        return {
+            "questions": question_count,
+            "answers": answer_count,
+            "documents": document_count,
+            "chunks": chunk_count,
+            "knowledge_base": kb_stats,
+            "openai_configured": rag_service.openai_configured,
+            "version": "3.1.0 - Knowledge-Base-First Logic",
+            "response_priority": [
+                "1. Built-in Knowledge Base (fastest)",
+                "2. PDF Document Search", 
+                "3. Q&A Database Cache",
+                "4. ChatGPT Generation"
+            ]
         }
         
     except Exception as e:
-        print(f"❌ Error checking knowledge_base table: {str(e)}")
-        import traceback
-        print(f"❌ Traceback: {traceback.format_exc()}")
+        print(f"❌ Error getting stats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting stats: {str(e)}"
+        )
+
+@app.get("/qa-cache")
+async def get_qa_cache(
+    skip: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get cached Q&A pairs"""
+    try:
+        result = db.execute(text("""
+            SELECT q.id, q.text as question, q.created_at,
+                   a.text as answer, a.confidence_score, a.created_at as answer_date
+            FROM questions q
+            JOIN answers a ON q.id = a.question_id
+            WHERE a.id = (
+                SELECT id FROM answers a2 
+                WHERE a2.question_id = q.id 
+                ORDER BY a2.created_at DESC 
+                LIMIT 1
+            )
+            ORDER BY q.created_at DESC
+            LIMIT :limit OFFSET :skip
+        """), {"limit": limit, "skip": skip})
+        
+        qa_pairs = []
+        for row in result:
+            qa_pairs.append({
+                "question_id": row[0],
+                "question": row[1],
+                "question_date": row[2],
+                "answer": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
+                "confidence": float(row[4]),
+                "answer_date": row[5]
+            })
+        
         return {
-            "table_exists": False,
-            "error": str(e),
-            "message": "Error accessing knowledge_base table"
+            "qa_pairs": qa_pairs,
+            "total": len(qa_pairs),
+            "message": "Q&A cache retrieved successfully"
         }
+        
+    except Exception as e:
+        print(f"❌ Error getting Q&A cache: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting Q&A cache: {str(e)}"
+        )
+
+@app.get("/debug/chunks")
+async def debug_chunks(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Debug endpoint to check document chunks"""
+    try:
+        result = db.execute(text("""
+            SELECT dc.id, dc.content, dc.chunk_embedding IS NOT NULL as has_embedding,
+                   d.original_filename, d.processed
+            FROM document_chunks dc
+            JOIN documents d ON dc.document_id = d.id
+            ORDER BY dc.id
+            LIMIT 10
+        """))
+        
+        chunks = []
+        for row in result:
+            chunks.append({
+                "chunk_id": row[0],
+                "content_preview": row[1][:100] + "..." if len(row[1]) > 100 else row[1],
+                "has_embedding": row[2],
+                "filename": row[3],
+                "document_processed": row[4]
+            })
+        
+        return {
+            "chunks": chunks,
+            "total_chunks": len(chunks),
+            "message": "Debug info for document chunks"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in debug endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error in debug endpoint: {str(e)}"
+        )
+
+@app.get("/debug/documents")
+async def debug_documents(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Debug endpoint to check documents table"""
+    try:
+        # Check table structure
+        table_info = db.execute(text("""
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns 
+            WHERE table_name = 'documents' 
+            ORDER BY ordinal_position
+        """)).fetchall()
+        
+        # Get all documents with raw data
+        documents_raw = db.execute(text("""
+            SELECT id, filename, original_filename, file_size, 
+                   content_type, upload_date, processed, processing_status,
+                   total_pages, total_chunks, error_message
+            FROM documents 
+            ORDER BY id
+        """)).fetchall()
+        
+        # Get document count
+        doc_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
+        
+        return {
+            "table_exists": len(table_info) > 0,
+            "table_columns": [{"name": col[0], "type": col[1], "nullable": col[2]} for col in table_info],
+            "total_documents": doc_count,
+            "documents_raw": [
+                {
+                    "id": row[0],
+                    "filename": row[1],
+                    "original_filename": row[2],
+                    "file_size": row[3],
+                    "content_type": row[4],
+                    "upload_date": str(row[5]) if row[5] else None,
+                    "processed": row[6],
+                    "processing_status": row[7],
+                    "total_pages": row[8],
+                    "total_chunks": row[9],
+                    "error_message": row[10] if len(row) > 10 else None
+                } for row in documents_raw
+            ],
+            "message": f"Found {doc_count} documents in database"
+        }
+        
+    except Exception as e:
+        return {
+            "error": str(e),
+            "table_exists": False,
+            "message": f"Error debugging documents: {str(e)}"
+        }
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True
+    )
