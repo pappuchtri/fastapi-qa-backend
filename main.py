@@ -1,88 +1,157 @@
-from typing import List
-from fastapi import FastAPI, HTTPException
+from typing import List, Optional, Dict, Any
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
-from document_models import Document, DocumentChunk
+from datetime import datetime
+import os
 
-app = FastAPI()
+app = FastAPI(title="Document RAG API", version="1.0.0")
 
-
+# Pydantic models for API requests/responses
 class DocumentCreate(BaseModel):
-    title: str
-    content: str
+    filename: str
+    original_filename: str
+    file_size: int
+    content_type: str = "application/pdf"
 
+class DocumentResponse(BaseModel):
+    id: int
+    filename: str
+    original_filename: str
+    file_size: int
+    content_type: str
+    upload_date: datetime
+    processed: bool
+    processing_status: str
+    error_message: Optional[str] = None
+    total_pages: Optional[int] = None
+    total_chunks: int = 0
+    doc_metadata: Dict[str, Any] = {}
+    
+    class Config:
+        from_attributes = True
 
-class DocumentChunkCreate(BaseModel):
+class DocumentChunkResponse(BaseModel):
+    id: int
     document_id: int
+    chunk_index: int
     content: str
-    order: int
+    page_number: Optional[int] = None
+    word_count: Optional[int] = None
+    created_at: datetime
+    chunk_metadata: Dict[str, Any] = {}
+    
+    class Config:
+        from_attributes = True
 
+class StatsResponse(BaseModel):
+    total_questions: int
+    total_answers: int
+    total_documents: int
+    total_chunks: int
+    openai_configured: bool
+    timestamp: datetime
 
-@app.post("/documents/", response_model=Document)
-def create_document(document: DocumentCreate):
-    """
-    Creates a new document.
-    """
-    # In a real application, you would save this to a database.
-    # For this example, we'll just return the document.
-    new_document = Document(id=1, title=document.title, content=document.content)
-    return new_document
+class QACacheResponse(BaseModel):
+    question: str
+    answer: str
+    confidence: float
+    created_at: datetime
 
+# Health check endpoint
+@app.get("/")
+async def root():
+    return {"message": "Document RAG API is running", "status": "healthy"}
 
-@app.get("/documents/", response_model=List[Document])
-def list_documents():
-    """
-    Lists all documents.
-    """
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.utcnow()}
+
+# Stats endpoint
+@app.get("/stats", response_model=StatsResponse)
+async def get_stats():
     try:
-        # In a real application, you would fetch this from a database.
-        # For this example, we'll just return a hardcoded list.
-        documents = [
-            Document(id=1, title="Document 1", content="This is the first document."),
-            Document(id=2, title="Document 2", content="This is the second document."),
-        ]
+        # Mock stats for now - in production this would query the database
+        stats = StatsResponse(
+            total_questions=0,
+            total_answers=0,
+            total_documents=0,
+            total_chunks=0,
+            openai_configured=bool(os.getenv("OPENAI_API_KEY")),
+            timestamp=datetime.utcnow()
+        )
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
+
+# QA Cache endpoint
+@app.get("/qa-cache", response_model=List[QACacheResponse])
+async def get_qa_cache():
+    try:
+        # Mock cache data for now - in production this would query the database
+        cache_data = []
+        return cache_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching QA cache: {str(e)}")
+
+# Documents endpoints
+@app.get("/documents", response_model=List[DocumentResponse])
+async def list_documents():
+    try:
+        # Mock documents for now - in production this would query the database
+        documents = []
         return documents
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
-
-@app.get("/documents/{document_id}", response_model=Document)
-def read_document(document_id: int):
-    """
-    Reads a specific document by ID.
-    """
-    # In a real application, you would fetch this from a database.
-    # For this example, we'll just return a hardcoded document.
-    if document_id == 1:
-        return Document(id=1, title="Document 1", content="This is the first document.")
-    else:
+@app.get("/documents/{document_id}", response_model=DocumentResponse)
+async def get_document(document_id: int):
+    try:
+        # Mock document for now - in production this would query the database
         raise HTTPException(status_code=404, detail="Document not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching document: {str(e)}")
 
+@app.delete("/documents/{document_id}")
+async def delete_document(document_id: int):
+    try:
+        # Mock deletion for now - in production this would delete from database
+        return {"message": f"Document {document_id} deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
 
-@app.post("/document_chunks/", response_model=DocumentChunk)
-def create_document_chunk(document_chunk: DocumentChunkCreate):
-    """
-    Creates a new document chunk.
-    """
-    # In a real application, you would save this to a database.
-    # For this example, we'll just return the document chunk.
-    new_document_chunk = DocumentChunk(
-        id=1,
-        document_id=document_chunk.document_id,
-        content=document_chunk.content,
-        order=document_chunk.order,
-    )
-    return new_document_chunk
+# Document chunks endpoint
+@app.get("/documents/{document_id}/chunks", response_model=List[DocumentChunkResponse])
+async def get_document_chunks(document_id: int):
+    try:
+        # Mock chunks for now - in production this would query the database
+        chunks = []
+        return chunks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching document chunks: {str(e)}")
 
+# Chat/Query endpoint
+@app.post("/chat")
+async def chat_with_documents(request: dict):
+    try:
+        query = request.get("message", "")
+        if not query:
+            raise HTTPException(status_code=400, detail="Message is required")
+        
+        # Mock response for now - in production this would use RAG
+        response = {
+            "response": "This is a mock response. The RAG system is not yet connected to a database.",
+            "sources": [],
+            "confidence": 0.0
+        }
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing chat request: {str(e)}")
 
-@app.get("/document_chunks/{document_id}", response_model=List[DocumentChunk])
-def list_document_chunks(document_id: int):
-    """
-    Lists all document chunks for a specific document.
-    """
-    # In a real application, you would fetch this from a database.
-    # For this example, we'll just return a hardcoded list.
-    document_chunks = [
-        DocumentChunk(id=1, document_id=document_id, content="Chunk 1", order=1),
-        DocumentChunk(id=2, document_id=document_id, content="Chunk 2", order=2),
-    ]
-    return document_chunks
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
