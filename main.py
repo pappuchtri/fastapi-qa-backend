@@ -362,26 +362,21 @@ async def ask_question(
         )
 
 @app.post("/save-answer")
-async def save_answer_to_database(
+async def save_answer_to_knowledge_base(
     save_request: dict,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
     """
-    Save an answer to the knowledge base when user clicks 'Save to Knowledge Base'
+    Save an answer ONLY to the knowledge base (NOT Q&A database)
     """
     try:
-        print(f"🔥 SAVE-ANSWER ENDPOINT CALLED")
+        print(f"🔥 SAVE-ANSWER ENDPOINT CALLED - KNOWLEDGE BASE ONLY")
         print(f"📥 Full save request: {save_request}")
         
         question_text = save_request.get("question")
         answer_text = save_request.get("answer")
         answer_type = save_request.get("answer_type", "user_saved")
-        confidence_score = save_request.get("confidence_score", 0.9)
-        
-        print(f"📝 Question: {question_text[:100] if question_text else 'None'}...")
-        print(f"📝 Answer length: {len(answer_text) if answer_text else 0}")
-        print(f"📝 Answer type: {answer_type}")
         
         if not question_text or not answer_text:
             print("❌ Missing question or answer text")
@@ -390,7 +385,9 @@ async def save_answer_to_database(
                 detail="Question and answer are required"
             )
         
-        print(f"🎯 FORCING KNOWLEDGE BASE SAVE (NOT Q&A DATABASE)")
+        print(f"🎯 SAVING TO KNOWLEDGE BASE ONLY (NO Q&A DATABASE)")
+        print(f"📝 Question: {question_text[:100]}...")
+        print(f"📝 Answer: {answer_text[:100]}...")
         
         # Determine category
         category = "User Generated"
@@ -404,37 +401,39 @@ async def save_answer_to_database(
         stop_words = {"what", "how", "why", "when", "where", "is", "are", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by"}
         keywords = [word.strip(".,!?;:") for word in question_words if word.lower() not in stop_words and len(word) > 2]
         
-        print(f"📂 Category: {category}")
-        print(f"🏷️ Keywords: {keywords[:5]}")
-        
-        # Create knowledge base entry
-        kb_entry = KnowledgeBaseCreate(
-            category=category,
-            question=question_text,
-            answer=answer_text,
-            keywords=keywords[:10],
-            priority=5,
-            is_active=True
-        )
-        
-        print("🚀 CALLING knowledge_service.create_knowledge_entry...")
+        # Create knowledge base entry directly in database (bypass service for debugging)
+        print("🚀 CREATING KNOWLEDGE BASE ENTRY DIRECTLY...")
         
         try:
-            new_kb_entry = knowledge_service.create_knowledge_entry(db, kb_entry, created_by="user_save")
-            print(f"✅ SUCCESS! Knowledge base entry created with ID: {new_kb_entry.id}")
-            print(f"✅ Entry details: Category={new_kb_entry.category}, Priority={new_kb_entry.priority}")
+            # Create the knowledge base entry directly
+            kb_entry = KnowledgeBase(
+                category=category,
+                question=question_text,
+                answer=answer_text,
+                keywords=keywords[:10],
+                priority=5,
+                is_active=True,
+                created_by="user_save"
+            )
             
-            # FORCE RETURN KNOWLEDGE BASE FORMAT (NOT Q&A FORMAT)
+            db.add(kb_entry)
+            db.commit()
+            db.refresh(kb_entry)
+            
+            print(f"✅ SUCCESS! Knowledge base entry created with ID: {kb_entry.id}")
+            print(f"✅ Category: {kb_entry.category}")
+            print(f"✅ Keywords: {kb_entry.keywords}")
+            
+            # RETURN KNOWLEDGE BASE FORMAT (NOT Q&A FORMAT)
             response = {
                 "message": "Answer saved successfully to knowledge base",
-                "knowledge_base_id": new_kb_entry.id,  # NOT question_id/answer_id
-                "category": new_kb_entry.category,
-                "keywords": new_kb_entry.keywords,
-                "priority": new_kb_entry.priority,
+                "knowledge_base_id": kb_entry.id,  # This is the key field
+                "category": kb_entry.category,
+                "keywords": kb_entry.keywords,
+                "priority": kb_entry.priority,
                 "saved_at": datetime.utcnow().isoformat(),
                 "success": True,
-                "save_location": "knowledge_base",
-                "entry_id": new_kb_entry.id
+                "save_location": "knowledge_base"
             }
             
             print(f"🎉 RETURNING KNOWLEDGE BASE RESPONSE: {response}")
@@ -442,11 +441,31 @@ async def save_answer_to_database(
             
         except Exception as kb_error:
             print(f"💥 KNOWLEDGE BASE SAVE FAILED: {str(kb_error)}")
-            print(f"💥 Error type: {type(kb_error).__name__}")
             import traceback
             print(f"💥 Full traceback: {traceback.format_exc()}")
             
-            # DO NOT FALL BACK TO Q&A DATABASE - RAISE ERROR INSTEAD
+            # Check if knowledge_base table exists
+            try:
+                table_exists = db.execute(text("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'knowledge_base'
+                """)).fetchone()
+                
+                if not table_exists:
+                    print("💥 KNOWLEDGE_BASE TABLE DOES NOT EXIST!")
+                    return {
+                        "error": "knowledge_base table does not exist",
+                        "message": "Please run database migration to create knowledge_base table",
+                        "success": False
+                    }
+                else:
+                    print("✅ knowledge_base table exists")
+                    
+            except Exception as table_check_error:
+                print(f"💥 Error checking table: {table_check_error}")
+            
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to save to knowledge base: {str(kb_error)}"
@@ -457,7 +476,6 @@ async def save_answer_to_database(
         raise he
     except Exception as e:
         print(f"💥 UNEXPECTED ERROR: {str(e)}")
-        print(f"💥 Error type: {type(e).__name__}")
         import traceback
         print(f"💥 Traceback: {traceback.format_exc()}")
         raise HTTPException(
@@ -935,3 +953,76 @@ async def list_documents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error listing documents: {str(e)}"
         )
+
+@app.get("/debug/knowledge-base-table")
+async def debug_knowledge_base_table(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Debug endpoint to check if knowledge_base table exists and is accessible"""
+    try:
+        print("🔍 Checking knowledge_base table...")
+        
+        # Check if table exists
+        table_exists = db.execute(text("""
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = 'knowledge_base'
+        """)).fetchone()
+        
+        if not table_exists:
+            print("❌ knowledge_base table does not exist")
+            return {
+                "table_exists": False,
+                "error": "knowledge_base table not found",
+                "suggestion": "Run: python scripts/create_knowledge_base_table.py"
+            }
+        
+        print("✅ knowledge_base table exists")
+        
+        # Check table structure
+        columns = db.execute(text("""
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_name = 'knowledge_base'
+            ORDER BY ordinal_position
+        """)).fetchall()
+        
+        # Try to count entries
+        count = db.execute(text("SELECT COUNT(*) FROM knowledge_base")).fetchone()[0]
+        
+        # Try to insert a test entry
+        test_entry = KnowledgeBase(
+            category="Debug Test",
+            question="Test question for debugging",
+            answer="Test answer for debugging",
+            keywords=["test", "debug"],
+            priority=1,
+            is_active=True,
+            created_by="debug"
+        )
+        
+        db.add(test_entry)
+        db.commit()
+        db.refresh(test_entry)
+        
+        print(f"✅ Test entry created with ID: {test_entry.id}")
+        
+        return {
+            "table_exists": True,
+            "columns": [{"name": col[0], "type": col[1]} for col in columns],
+            "entry_count": count,
+            "test_entry_id": test_entry.id,
+            "message": "knowledge_base table is working correctly"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error checking knowledge_base table: {str(e)}")
+        import traceback
+        print(f"❌ Traceback: {traceback.format_exc()}")
+        return {
+            "table_exists": False,
+            "error": str(e),
+            "message": "Error accessing knowledge_base table"
+        }
