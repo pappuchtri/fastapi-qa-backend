@@ -1,8 +1,17 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
-from sqlalchemy.dialects.postgresql import VECTOR, ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
+
+# Try to import VECTOR from pgvector, fallback to Text if not available
+try:
+    from pgvector.sqlalchemy import Vector
+    VECTOR_TYPE = Vector(1536)  # OpenAI ada-002 embedding dimension
+    print("✅ Using pgvector for embeddings")
+except ImportError:
+    print("⚠️  pgvector not available, using Text for embeddings")
+    VECTOR_TYPE = Text  # Fallback to Text type
 
 class Document(Base):
     __tablename__ = "documents"
@@ -31,7 +40,7 @@ class DocumentChunk(Base):
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
     page_number = Column(Integer, nullable=True, index=True)
-    chunk_embedding = Column(VECTOR(1536), nullable=True)  # OpenAI ada-002 embedding dimension
+    chunk_embedding = Column(VECTOR_TYPE, nullable=True)  # Vector embeddings with fallback
     word_count = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     metadata = Column(JSONB, default=lambda: {})
