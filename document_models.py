@@ -27,7 +27,7 @@ class Document(Base):
     error_message = Column(Text, nullable=True)
     total_pages = Column(Integer, nullable=True)
     total_chunks = Column(Integer, default=0)
-    metadata = Column(JSONB, default=lambda: {})
+    doc_metadata = Column(JSONB, default=lambda: {})  # Renamed from 'metadata'
     
     # Relationships
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
@@ -43,7 +43,7 @@ class DocumentChunk(Base):
     chunk_embedding = Column(VECTOR_TYPE, nullable=True)  # Vector embeddings with fallback
     word_count = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSONB, default=lambda: {})
+    chunk_metadata = Column(JSONB, default=lambda: {})  # Renamed from 'metadata'
     
     # Relationships
     document = relationship("Document", back_populates="chunks")
