@@ -44,44 +44,44 @@ class RAGService:
             np.random.seed(int(text_hash[:8], 16))  # Consistent seed based on text
             embedding = np.random.rand(self.embedding_dimension)
             return embedding
-    
-    try:
-        print(f"🤖 Generating OpenAI embedding for: {text[:50]}...")
         
-        # Use the stable 0.28.1 API format
-        import openai
-        response = openai.Embedding.create(
-            model="text-embedding-ada-002",
-            input=text
-        )
-        
-        # Fix: Proper handling of embedding response
-        embedding_data = response.get('data', [])
-        if not embedding_data:
-            raise ValueError("No embedding data received from OpenAI")
-        
-        embedding_vector = embedding_data[0].get('embedding', [])
-        if not embedding_vector:
-            raise ValueError("Empty embedding vector received")
-        
-        embedding = np.array(embedding_vector, dtype=np.float32)
-        
-        # Validate embedding dimension
-        if len(embedding) != self.embedding_dimension:
-            raise ValueError(f"Expected embedding dimension {self.embedding_dimension}, got {len(embedding)}")
-        
-        print(f"✅ Embedding generated successfully (dimension: {len(embedding)})")
-        return embedding
-        
-    except Exception as e:
-        print(f"❌ Error generating embedding: {str(e)}")
-        print("🎭 Falling back to demo embedding")
-        # Return a consistent dummy embedding as fallback
-        import hashlib
-        text_hash = hashlib.md5(text.encode()).hexdigest()
-        np.random.seed(int(text_hash[:8], 16))
-        embedding = np.random.rand(self.embedding_dimension).astype(np.float32)
-        return embedding
+        try:
+            print(f"🤖 Generating OpenAI embedding for: {text[:50]}...")
+            
+            # Use the stable 0.28.1 API format
+            import openai
+            response = openai.Embedding.create(
+                model="text-embedding-ada-002",
+                input=text
+            )
+            
+            # Fix: Proper handling of embedding response
+            embedding_data = response.get('data', [])
+            if not embedding_data:
+                raise ValueError("No embedding data received from OpenAI")
+            
+            embedding_vector = embedding_data[0].get('embedding', [])
+            if not embedding_vector:
+                raise ValueError("Empty embedding vector received")
+            
+            embedding = np.array(embedding_vector, dtype=np.float32)
+            
+            # Validate embedding dimension
+            if len(embedding) != self.embedding_dimension:
+                raise ValueError(f"Expected embedding dimension {self.embedding_dimension}, got {len(embedding)}")
+            
+            print(f"✅ Embedding generated successfully (dimension: {len(embedding)})")
+            return embedding
+            
+        except Exception as e:
+            print(f"❌ Error generating embedding: {str(e)}")
+            print("🎭 Falling back to demo embedding")
+            # Return a consistent dummy embedding as fallback
+            import hashlib
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            np.random.seed(int(text_hash[:8], 16))
+            embedding = np.random.rand(self.embedding_dimension).astype(np.float32)
+            return embedding
     
     async def find_similar_question(
         self, 
@@ -119,37 +119,37 @@ class RAGService:
                         vector = np.array([float(x) for x in vector_list], dtype=np.float32)
                     else:
                         vector = np.array(emb.vector, dtype=np.float32)
-                
-                # Ensure vector has correct dimension
-                if len(vector) != self.embedding_dimension:
-                    print(f"⚠️ Skipping embedding {emb.id}: wrong dimension {len(vector)}")
-                    continue
-                
-                # Fix: Ensure both vectors are numpy arrays before similarity calculation
-                if not isinstance(query_embedding, np.ndarray):
-                    query_embedding = np.array(query_embedding, dtype=np.float32)
-                
-                # Calculate cosine similarity
-                similarity = self.calculate_cosine_similarity(query_embedding, vector)
-                
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    question = db.query(Question).filter(Question.id == emb.question_id).first()
-                    best_question = question
                     
-            except Exception as e:
-                print(f"⚠️ Error processing embedding {emb.id}: {str(e)}")
-                continue
+                    # Ensure vector has correct dimension
+                    if len(vector) != self.embedding_dimension:
+                        print(f"⚠️ Skipping embedding {emb.id}: wrong dimension {len(vector)}")
+                        continue
+                    
+                    # Fix: Ensure both vectors are numpy arrays before similarity calculation
+                    if not isinstance(query_embedding, np.ndarray):
+                        query_embedding = np.array(query_embedding, dtype=np.float32)
+                    
+                    # Calculate cosine similarity
+                    similarity = self.calculate_cosine_similarity(query_embedding, vector)
+                    
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        question = db.query(Question).filter(Question.id == emb.question_id).first()
+                        best_question = question
+                        
+                except Exception as e:
+                    print(f"⚠️ Error processing embedding {emb.id}: {str(e)}")
+                    continue
+            
+            print(f"🎯 Best match: {best_similarity:.3f} similarity")
+            if best_question:
+                print(f"📝 Similar question: {best_question.text[:50]}...")
+            
+            return best_question, float(best_similarity)
         
-        print(f"🎯 Best match: {best_similarity:.3f} similarity")
-        if best_question:
-            print(f"📝 Similar question: {best_question.text[:50]}...")
-        
-        return best_question, float(best_similarity)
-    
-    except Exception as e:
-        print(f"❌ Error in similarity search: {str(e)}")
-        return None, 0.0
+        except Exception as e:
+            print(f"❌ Error in similarity search: {str(e)}")
+            return None, 0.0
     
     async def search_document_chunks(
         self, 
