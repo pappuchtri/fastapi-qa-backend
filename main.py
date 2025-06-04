@@ -6,6 +6,13 @@ from datetime import datetime
 import os
 import uuid
 import shutil
+from sqlalchemy.orm import Session
+
+# Import database and models
+from database import get_db
+from document_models import Document, DocumentChunk
+from document_schemas import DocumentResponse, DocumentCreate, DocumentListResponse
+import document_crud as crud
 
 app = FastAPI(title="Document RAG API", version="1.0.0")
 
@@ -18,43 +25,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pydantic models for API requests/responses
-class DocumentCreate(BaseModel):
-    filename: str
-    original_filename: str
-    file_size: int
-    content_type: str = "application/pdf"
-
-class DocumentResponse(BaseModel):
-    id: int
-    filename: str
-    original_filename: str
-    file_size: int
-    content_type: str
-    upload_date: datetime
-    processed: bool
-    processing_status: str
-    error_message: Optional[str] = None
-    total_pages: Optional[int] = None
-    total_chunks: int = 0
-    doc_metadata: Dict[str, Any] = {}
-    
-    class Config:
-        from_attributes = True
-
-class DocumentChunkResponse(BaseModel):
-    id: int
-    document_id: int
-    chunk_index: int
-    content: str
-    page_number: Optional[int] = None
-    word_count: Optional[int] = None
-    created_at: datetime
-    chunk_metadata: Dict[str, Any] = {}
-    
-    class Config:
-        from_attributes = True
-
+# Pydantic models for API
 class StatsResponse(BaseModel):
     questions: int
     answers: int
@@ -85,14 +56,17 @@ async def health_check():
 
 # Stats endpoint
 @app.get("/stats")
-async def get_stats():
+async def get_stats(db: Session = Depends(get_db)):
     try:
-        # Mock stats for now - in production this would query the database
+        # Get actual document and chunk counts from database
+        document_count = crud.get_document_count(db)
+        chunk_count = crud.get_chunk_count(db)
+        
         stats = {
-            "questions": 0,
-            "answers": 0,
-            "documents": 0,
-            "chunks": 0,
+            "questions": 0,  # Would come from a questions table
+            "answers": 0,    # Would come from an answers table
+            "documents": document_count,
+            "chunks": chunk_count,
             "openai_configured": bool(os.getenv("OPENAI_API_KEY"))
         }
         return stats
@@ -113,37 +87,59 @@ async def get_qa_cache():
 
 # Documents endpoints
 @app.get("/documents")
-async def list_documents():
+async def list_documents(
+    skip: int = 0, 
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
     try:
-        # Mock documents for now - in production this would query the database
-        documents = {
-            "documents": []
+        # Get documents from database
+        documents = crud.get_documents(db, skip=skip, limit=limit)
+        total = crud.get_document_count(db)
+        
+        # Format response
+        response = {
+            "documents": documents,
+            "total": total,
+            "page": skip // limit + 1 if limit > 0 else 1,
+            "per_page": limit
         }
-        return documents
+        return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
 @app.get("/documents/{document_id}")
-async def get_document(document_id: int):
+async def get_document(document_id: int, db: Session = Depends(get_db)):
     try:
-        # Mock document for now - in production this would query the database
-        raise HTTPException(status_code=404, detail="Document not found")
+        # Get document from database
+        document = crud.get_document(db, document_id=document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return document
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching document: {str(e)}")
 
 @app.delete("/documents/{document_id}")
-async def delete_document(document_id: int):
+async def delete_document(document_id: int, db: Session = Depends(get_db)):
     try:
-        # Mock deletion for now - in production this would delete from database
+        # Delete document from database
+        success = crud.delete_document(db, document_id=document_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Document not found")
         return {"message": f"Document {document_id} deleted successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
 
 # Document upload endpoint
 @app.post("/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
     try:
         # Validate file type
         if not file.filename.lower().endswith('.pdf'):
@@ -164,26 +160,24 @@ async def upload_document(file: UploadFile = File(...)):
         # Get file size
         file_size = os.path.getsize(file_path)
         
-        # In a real application, you would:
-        # 1. Save file metadata to database
-        # 2. Queue the file for processing (extract text, create chunks, etc.)
-        # 3. Return the document ID and status
+        # Create document in database
+        document_data = DocumentCreate(
+            filename=filename,
+            original_filename=file.filename,
+            file_size=file_size,
+            content_type="application/pdf"
+        )
         
-        # Mock response
-        document = {
-            "id": 1,
-            "filename": filename,
-            "original_filename": file.filename,
-            "file_size": file_size,
-            "content_type": "application/pdf",
-            "upload_date": str(datetime.utcnow()),
-            "processed": False,
-            "processing_status": "uploaded",
-            "total_pages": None,
-            "total_chunks": 0
+        db_document = crud.create_document(db, document=document_data)
+        
+        # Return document data
+        return {
+            "message": "Document uploaded successfully",
+            "document_id": db_document.id,
+            "filename": db_document.filename,
+            "file_size": db_document.file_size,
+            "processing_status": db_document.processing_status
         }
-        
-        return document
     except HTTPException:
         raise
     except Exception as e:
@@ -191,10 +185,10 @@ async def upload_document(file: UploadFile = File(...)):
 
 # Document chunks endpoint
 @app.get("/documents/{document_id}/chunks")
-async def get_document_chunks(document_id: int):
+async def get_document_chunks(document_id: int, db: Session = Depends(get_db)):
     try:
-        # Mock chunks for now - in production this would query the database
-        chunks = []
+        # Get chunks from database
+        chunks = crud.get_document_chunks(db, document_id=document_id)
         return {"chunks": chunks}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching document chunks: {str(e)}")
