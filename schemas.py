@@ -94,4 +94,39 @@ class FeedbackStats(BaseModel):
     avg_confidence_helpful: float
     avg_confidence_not_helpful: float
 
-# Finally, let's create a simple database migration to add the feedback table:
+# Knowledge Base schemas
+class KnowledgeBaseCreate(BaseModel):
+    category: str = Field(..., min_length=1, max_length=100)
+    question: str = Field(..., min_length=1, max_length=1000)
+    answer: str = Field(..., min_length=1)
+    keywords: Optional[List[str]] = Field(None, description="Keywords for search optimization")
+    priority: int = Field(1, ge=1, le=10, description="Priority level (1-10, higher = more important)")
+    is_active: bool = Field(True)
+
+class KnowledgeBaseResponse(BaseModel):
+    id: int
+    category: str
+    question: str
+    answer: str
+    keywords: Optional[List[str]]
+    priority: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    created_by: str
+    
+    class Config:
+        from_attributes = True
+
+class KnowledgeBaseUpdate(BaseModel):
+    category: Optional[str] = None
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    priority: Optional[int] = Field(None, ge=1, le=10)
+    is_active: Optional[bool] = None
+
+class KnowledgeBaseSearch(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    category: Optional[str] = None
+    limit: int = Field(5, ge=1, le=20)
