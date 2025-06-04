@@ -5,30 +5,6 @@ from datetime import datetime
 
 Base = declarative_base()
 
-class Question(Base):
-    __tablename__ = "questions"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    text = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class Answer(Base):
-    __tablename__ = "answers"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    question_id = Column(Integer, nullable=False)
-    text = Column(Text, nullable=False)
-    confidence_score = Column(Integer, default=90)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class Embedding(Base):
-    __tablename__ = "embeddings"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    question_id = Column(Integer, nullable=False)
-    embedding = Column(Text, nullable=False)  # Store as JSON string
-    created_at = Column(DateTime, default=datetime.utcnow)
-
 class KnowledgeBase(Base):
     __tablename__ = "knowledge_base"
     
