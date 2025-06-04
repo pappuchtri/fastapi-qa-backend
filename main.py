@@ -1,9 +1,11 @@
 from typing import List, Optional, Dict, Any
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
 import os
+import uuid
+import shutil
 
 app = FastAPI(title="Document RAG API", version="1.0.0")
 
@@ -138,6 +140,54 @@ async def delete_document(document_id: int):
         return {"message": f"Document {document_id} deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+
+# Document upload endpoint
+@app.post("/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    try:
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        
+        # Generate a unique filename
+        file_id = str(uuid.uuid4())
+        filename = f"{file_id}.pdf"
+        
+        # Create uploads directory if it doesn't exist
+        os.makedirs("uploads", exist_ok=True)
+        
+        # Save the file
+        file_path = f"uploads/{filename}"
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Get file size
+        file_size = os.path.getsize(file_path)
+        
+        # In a real application, you would:
+        # 1. Save file metadata to database
+        # 2. Queue the file for processing (extract text, create chunks, etc.)
+        # 3. Return the document ID and status
+        
+        # Mock response
+        document = {
+            "id": 1,
+            "filename": filename,
+            "original_filename": file.filename,
+            "file_size": file_size,
+            "content_type": "application/pdf",
+            "upload_date": str(datetime.utcnow()),
+            "processed": False,
+            "processing_status": "uploaded",
+            "total_pages": None,
+            "total_chunks": 0
+        }
+        
+        return document
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error uploading document: {str(e)}")
 
 # Document chunks endpoint
 @app.get("/documents/{document_id}/chunks")
