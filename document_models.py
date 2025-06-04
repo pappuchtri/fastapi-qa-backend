@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, JSONB
-from sqlalchemy.dialects.postgresql import VECTOR, ARRAY
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
+from sqlalchemy.dialects.postgresql import VECTOR, ARRAY, JSONB
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
