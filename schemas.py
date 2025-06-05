@@ -1,12 +1,12 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 class QuestionBase(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000, description="The question text")
 
-class QuestionCreate(QuestionBase):
-    pass
+class QuestionCreate(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000, description="The question text")
 
 class QuestionResponse(QuestionBase):
     id: int
@@ -23,11 +23,16 @@ class AnswerBase(BaseModel):
 class AnswerCreate(AnswerBase):
     question_id: int
 
-class AnswerResponse(AnswerBase):
-    id: int
-    question_id: int
-    created_at: datetime
-    updated_at: datetime
+class AnswerResponse(BaseModel):
+    answer: str
+    source: str = Field(..., description="Source of the answer: knowledge_base, document, database, ai_web_search, chatgpt, no_answer")
+    confidence_score: float = Field(..., ge=0.0, le=1.0)
+    generation_time_ms: int
+    source_documents: List[Dict[str, Any]] = Field(default_factory=list)
+    web_sources: Optional[List[Dict[str, str]]] = Field(default_factory=list)
+    can_save_to_kb: bool = False
+    question_id: Optional[int] = None
+    suggestions: Optional[List[str]] = Field(default_factory=list)
     
     class Config:
         from_attributes = True
@@ -130,3 +135,16 @@ class KnowledgeBaseSearch(BaseModel):
     query: str = Field(..., min_length=1, max_length=500)
     category: Optional[str] = None
     limit: int = Field(5, ge=1, le=20)
+
+class DocumentResponse(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    filename: str
+    content_type: str
+    upload_date: datetime
+    chunk_count: int = 0
+    processed: bool = False
+    
+    class Config:
+        from_attributes = True
