@@ -12,11 +12,11 @@ class RAGService:
         
         if self.openai_api_key:
             try:
-                # Use the older OpenAI library (0.28.1) which is more stable
-                import openai
-                openai.api_key = self.openai_api_key
+                # Use the new OpenAI client (v1.0+)
+                from openai import OpenAI
+                self.client = OpenAI(api_key=self.openai_api_key)
                 self.openai_configured = True
-                print("✅ OpenAI API key configured successfully (using openai==0.28.1)")
+                print("✅ OpenAI API key configured successfully (using openai>=1.0.0)")
             except Exception as e:
                 print(f"❌ Error configuring OpenAI: {str(e)}")
                 self.openai_configured = False
@@ -48,19 +48,18 @@ class RAGService:
         try:
             print(f"🤖 Generating OpenAI embedding for: {text[:50]}...")
             
-            # Use the stable 0.28.1 API format
-            import openai
-            response = openai.Embedding.create(
+            # Use the new OpenAI client (v1.0+)
+            from openai import OpenAI
+            client = OpenAI(api_key=self.openai_api_key)
+            
+            response = client.embeddings.create(
                 model="text-embedding-ada-002",
                 input=text
             )
             
-            # Fix: Proper handling of embedding response
-            embedding_data = response.get('data', [])
-            if not embedding_data:
-                raise ValueError("No embedding data received from OpenAI")
+            # Extract embedding from new API response format
+            embedding_vector = response.data[0].embedding
             
-            embedding_vector = embedding_data[0].get('embedding', [])
             if not embedding_vector:
                 raise ValueError("Empty embedding vector received")
             
@@ -69,10 +68,10 @@ class RAGService:
             # Validate embedding dimension
             if len(embedding) != self.embedding_dimension:
                 raise ValueError(f"Expected embedding dimension {self.embedding_dimension}, got {len(embedding)}")
-            
+        
             print(f"✅ Embedding generated successfully (dimension: {len(embedding)})")
             return embedding
-            
+        
         except Exception as e:
             print(f"❌ Error generating embedding: {str(e)}")
             print("🎭 Falling back to demo embedding")
@@ -285,35 +284,38 @@ class RAGService:
         """
         if not relevant_chunks:
             return await self.generate_answer(question)
-        
+    
         # Create context from chunks
         context_parts = []
         source_documents = list(set([chunk.get('filename', 'Unknown') for chunk in relevant_chunks]))
-        
+    
         for chunk in relevant_chunks:
             # Don't include source info in context - we'll show it separately
             context_parts.append(chunk.get('content', ''))
-        
+    
         context_text = "\n\n".join(context_parts)
-        
+    
         if not self.openai_configured:
             return f"""Based on the uploaded documents:
 
 {context_text}
 
 *Note: This is demo mode. With OpenAI configured, this would be a comprehensive answer based on the document content above.*"""
-        
+    
         try:
             print(f"🧠 Generating clean answer from {len(relevant_chunks)} document chunks...")
-            
-            import openai
-            response = openai.ChatCompletion.create(
+        
+            # Use the new OpenAI client (v1.0+)
+            from openai import OpenAI
+            client = OpenAI(api_key=self.openai_api_key)
+        
+            response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {
                         "role": "system",
                         "content": """You are a helpful assistant that answers questions based on provided document context. 
-                        
+                    
                         IMPORTANT RULES:
                         1. Answer the question directly and comprehensively using the document context
                         2. DO NOT mention the document names or suggest referring to specific documents
@@ -330,11 +332,11 @@ class RAGService:
                 max_tokens=600,
                 temperature=0.3
             )
-            
-            answer = response['choices'][0]['message']['content'].strip()
+        
+            answer = response.choices[0].message.content.strip()
             print(f"✅ Clean answer generated from document chunks ({len(answer)} characters)")
             return answer
-            
+        
         except Exception as e:
             print(f"❌ Error generating answer from chunks: {str(e)}")
             return f"""Based on the uploaded documents:
@@ -369,13 +371,15 @@ This is a demonstration response. To get AI-powered answers, please configure yo
 - Platform: Neon PostgreSQL  
 - Model: GPT-3.5-turbo (cost-effective and reliable)
 - Status: Fully operational in demo mode"""
-        
+    
         try:
             print(f"🧠 Generating AI answer using GPT-3.5-turbo for: {question[:50]}...")
-            
-            # Use the stable 0.28.1 API format with GPT-3.5-turbo
-            import openai
-            response = openai.ChatCompletion.create(
+        
+            # Use the new OpenAI client (v1.0+)
+            from openai import OpenAI
+            client = OpenAI(api_key=self.openai_api_key)
+        
+            response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {
@@ -391,22 +395,22 @@ This is a demonstration response. To get AI-powered answers, please configure yo
                 temperature=0.7,
                 timeout=30
             )
-            
-            answer = response['choices'][0]['message']['content'].strip()
+        
+            answer = response.choices[0].message.content.strip()
             print(f"✅ AI answer generated successfully using GPT-3.5-turbo ({len(answer)} characters)")
             return answer
-            
+        
         except Exception as e:
             error_msg = str(e)
             print(f"❌ Error generating answer with GPT-3.5-turbo: {error_msg}")
-            
+        
             return f"""I apologize, but I encountered an error while generating an answer to your question: "{question}". 
 
 **Error details:** {error_msg}
 
 **System Configuration:**
 - Model: GPT-3.5-turbo (available to all OpenAI accounts)
-- API: OpenAI 0.28.1 (stable)
+- API: OpenAI v1.0+ (modern client)
 
 **Possible solutions:**
 - Make sure your OpenAI account has billing set up and available credits
@@ -464,4 +468,4 @@ print("- Model: GPT-3.5-turbo (hardcoded, cost-effective)")
 print("- Clean answers: No document references in response text")
 print("- Source info: Shown separately in UI")
 print("- Embedding dimension: 1536 (text-embedding-ada-002)")
-print("- API format: OpenAI 0.28.1 (stable ChatCompletion API)")
+print("- API format: OpenAI v1.0+ (modern client)")
