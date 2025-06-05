@@ -18,7 +18,7 @@ load_dotenv()
 
 # Import our modules
 from database import SessionLocal, engine, get_db, Base
-from models import Question, Answer, Embedding
+from models import Question, Answer, Embedding, AnswerOverride, ReviewQueue
 from document_models import Document, DocumentChunk
 from feedback_models import AnswerFeedback
 from knowledge_base_service import knowledge_service
@@ -520,117 +520,639 @@ async def submit_feedback(
             detail=f"Error submitting feedback: {str(e)}"
         )
 
-@app.post("/reviews")
-async def create_review(
-    review_data: dict,
+@app.post("/suggest-questions", response_model=QuestionSuggestion)
+async def suggest_questions(
+    request: QuestionAnswerRequest,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Create a review for an answer"""
+    """Get AI suggestions for rephrasing unclear questions"""
     try:
-        print(f"📝 Creating review: {review_data}")
+        original_question = request.question.strip()
         
-        # For now, just log the review - you can enhance this later
-        review_id = int(time.time())  # Simple ID generation
+        if not original_question:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Question cannot be empty"
+            )
+        
+        # Generate suggestions (simplified for demo)
+        suggestions = [
+            f"What is {original_question.split()[-1] if original_question.split() else 'the topic'}?",
+            f"How does {original_question.split()[0] if original_question.split() else 'this'} work?",
+            f"Can you explain {original_question.lower()}?"
+        ]
+        
+        return QuestionSuggestion(
+            original_question=original_question,
+            suggested_questions=suggestions,
+            reasoning="AI-generated suggestions to improve question clarity."
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error generating question suggestions: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating suggestions: {str(e)}"
+        )
+
+# Knowledge Base Management Endpoints
+@app.post("/knowledge-base", response_model=KnowledgeBaseResponse)
+async def create_knowledge_entry(
+    entry: KnowledgeBaseCreate,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Create a new knowledge base entry"""
+    try:
+        db_entry = knowledge_service.create_knowledge_entry(db, entry, created_by="api_user")
+        return db_entry
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating knowledge base entry: {str(e)}"
+        )
+
+@app.get("/knowledge-base")
+async def list_knowledge_entries(
+    category: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """List knowledge base entries"""
+    try:
+        from models import KnowledgeBase
+        
+        query = db.query(KnowledgeBase).filter(KnowledgeBase.is_active == True)
+        
+        if category:
+            query = query.filter(KnowledgeBase.category == category)
+        
+        entries = query.order_by(KnowledgeBase.priority.desc(), KnowledgeBase.created_at.desc()).offset(skip).limit(limit).all()
         
         return {
-            "id": review_id,
-            "message": "Review created successfully",
-            "review_data": review_data,
-            "created_at": datetime.utcnow()
+            "entries": entries,
+            "total": len(entries),
+            "category_filter": category
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error listing knowledge base entries: {str(e)}"
+        )
+
+@app.get("/knowledge-base/categories")
+async def get_knowledge_categories(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get all knowledge base categories"""
+    try:
+        categories = knowledge_service.get_categories(db)
+        return {"categories": categories}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting categories: {str(e)}"
+        )
+
+@app.post("/knowledge-base/search")
+async def search_knowledge_base(
+    search_request: KnowledgeBaseSearch,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Search knowledge base entries"""
+    try:
+        results = knowledge_service.search_knowledge_base(
+            db, 
+            search_request.query,
+            search_request.category,
+            search_request.limit
+        )
+        return {
+            "results": results,
+            "query": search_request.query,
+            "total_found": len(results)
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error searching knowledge base: {str(e)}"
+        )
+
+@app.put("/knowledge-base/{entry_id}", response_model=KnowledgeBaseResponse)
+async def update_knowledge_entry(
+    entry_id: int,
+    update_data: KnowledgeBaseUpdate,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Update a knowledge base entry"""
+    try:
+        updated_entry = knowledge_service.update_knowledge_entry(db, entry_id, update_data)
+        if not updated_entry:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Knowledge base entry {entry_id} not found"
+            )
+        return updated_entry
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating knowledge base entry: {str(e)}"
+        )
+
+@app.delete("/knowledge-base/{entry_id}")
+async def delete_knowledge_entry(
+    entry_id: int,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Delete a knowledge base entry"""
+    try:
+        success = knowledge_service.delete_entry(db, entry_id)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Knowledge base entry {entry_id} not found"
+            )
+        return {"message": f"Knowledge base entry {entry_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting knowledge base entry: {str(e)}"
+        )
+
+@app.get("/knowledge-base/stats")
+async def get_knowledge_stats(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get knowledge base statistics"""
+    try:
+        stats = knowledge_service.get_stats(db)
+        return stats
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting knowledge base stats: {str(e)}"
+        )
+
+# Document Management Endpoints
+@app.get("/documents")
+async def list_documents(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """List all uploaded documents with enhanced error handling"""
+    try:
+        print("🔍 Fetching documents from database...")
+        
+        # First, check if documents table exists
+        try:
+            table_check = db.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'documents'
+                )
+            """))
+            table_exists = table_check.fetchone()[0]
+            print(f"📊 Documents table exists: {table_exists}")
+            
+            if not table_exists:
+                print("⚠️ Documents table does not exist, creating it...")
+                # Create the table
+                Base.metadata.create_all(bind=engine)
+                print("✅ Documents table created")
+                
+                return {
+                    "documents": [],
+                    "total": 0,
+                    "message": "Documents table created, no documents found",
+                    "debug_info": {
+                        "table_exists": True,
+                        "total_count": 0,
+                        "query_executed": True,
+                        "table_created": True
+                    }
+                }
+        except Exception as table_error:
+            print(f"❌ Error checking table existence: {str(table_error)}")
+            # Continue anyway, maybe the table exists but we can't check
+        
+        # Get total count
+        try:
+            count_result = db.execute(text("SELECT COUNT(*) FROM documents"))
+            total_count = count_result.fetchone()[0]
+            print(f"📊 Total documents in database: {total_count}")
+        except Exception as count_error:
+            print(f"❌ Error getting document count: {str(count_error)}")
+            total_count = 0
+        
+        if total_count == 0:
+            print("⚠️ No documents found in database")
+            return {
+                "documents": [],
+                "total": 0,
+                "message": "No documents found in database",
+                "debug_info": {
+                    "table_exists": True,
+                    "total_count": 0,
+                    "query_executed": True
+                }
+            }
+        
+        # Fetch documents with detailed logging
+        try:
+            result = db.execute(text("""
+                SELECT id, filename, original_filename, file_size, 
+                       content_type, upload_date, processed, processing_status,
+                       total_pages, total_chunks
+                FROM documents 
+                ORDER BY upload_date DESC
+                LIMIT :limit OFFSET :skip
+            """), {"limit": limit, "skip": skip})
+            
+            documents = []
+            for row in result:
+                doc = {
+                    "id": row[0],
+                    "filename": row[1],
+                    "original_filename": row[2],
+                    "file_size": row[3],
+                    "content_type": row[4],
+                    "upload_date": row[5].isoformat() if row[5] else None,
+                    "processed": row[6],
+                    "processing_status": row[7],
+                    "total_pages": row[8],
+                    "total_chunks": row[9]
+                }
+                documents.append(doc)
+                print(f"📄 Found document: {doc['original_filename']} (ID: {doc['id']})")
+            
+            print(f"✅ Successfully fetched {len(documents)} documents")
+            
+            return {
+                "documents": documents,
+                "total": total_count,
+                "message": f"Successfully retrieved {len(documents)} documents",
+                "debug_info": {
+                    "table_exists": True,
+                    "total_count": total_count,
+                    "returned_count": len(documents),
+                    "query_executed": True,
+                    "skip": skip,
+                    "limit": limit
+                }
+            }
+            
+        except Exception as query_error:
+            print(f"❌ Error executing documents query: {str(query_error)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error querying documents: {str(query_error)}"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Unexpected error listing documents: {str(e)}")
+        
+        # Try to provide more debugging info
+        try:
+            # Check if table exists
+            table_check = db.execute(text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'documents'
+            """))
+            table_exists = table_check.fetchone() is not None
+            
+            return {
+                "documents": [],
+                "total": 0,
+                "message": f"Error retrieving documents: {str(e)}",
+                "debug_info": {
+                    "table_exists": table_exists,
+                    "error": str(e),
+                    "query_executed": False
+                }
+            }
+        except:
+            pass
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error listing documents: {str(e)}"
+        )
+
+@app.post("/documents/upload")
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Upload and process a PDF document"""
+    try:
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are supported"
+            )
+        
+        # Read file content
+        file_content = await file.read()
+        
+        if len(file_content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Empty file uploaded"
+            )
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        
+        print(f"📤 Uploading document: {file.filename} ({len(file_content)} bytes)")
+        
+        # Insert document record
+        document = Document(
+            filename=unique_filename,
+            original_filename=file.filename,
+            file_size=len(file_content),
+            content_type="application/pdf",
+            processing_status="uploaded"
+        )
+        
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+        
+        print(f"✅ Document saved to database with ID: {document.id}")
+        
+        # Process PDF in background
+        pdf_processor = SimplePDFProcessor(rag_service)
+        background_tasks.add_task(
+            pdf_processor.process_pdf_content,
+            db,
+            document.id,
+            file_content
+        )
+        
+        return {
+            "message": "Document uploaded successfully and processing started",
+            "document_id": document.id,
+            "filename": file.filename,
+            "file_size": len(file_content),
+            "processing_status": "uploaded"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error uploading document: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading document: {str(e)}"
+        )
+
+@app.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Delete a document and all its chunks"""
+    try:
+        print(f"🗑️ Deleting document ID: {document_id}")
+        
+        # Check if document exists
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found"
+            )
+        
+        original_filename = document.original_filename
+        
+        # Delete all chunks for this document (CASCADE should handle this, but let's be explicit)
+        chunks_deleted = db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete()
+        print(f"🗑️ Deleted {chunks_deleted} chunks for document {document_id}")
+        
+        # Delete the document
+        db.delete(document)
+        db.commit()
+        
+        print(f"✅ Successfully deleted document: {original_filename} (ID: {document_id})")
+        
+        return {
+            "message": f"Document '{original_filename}' deleted successfully",
+            "document_id": document_id,
+            "chunks_deleted": chunks_deleted,
+            "deleted_at": datetime.utcnow()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting document {document_id}: {str(e)}")
+        db.rollback()  # Rollback in case of error
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting document: {str(e)}"
+        )
+
+@app.get("/stats")
+async def get_stats(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get API statistics including knowledge base"""
+    try:
+        # Use safe queries with error handling
+        try:
+            question_count = db.execute(text("SELECT COUNT(*) FROM questions")).fetchone()[0]
+        except:
+            question_count = 0
+            
+        try:
+            answer_count = db.execute(text("SELECT COUNT(*) FROM answers")).fetchone()[0]
+        except:
+            answer_count = 0
+            
+        try:
+            document_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
+        except:
+            document_count = 0
+            
+        try:
+            chunk_count = db.execute(text("SELECT COUNT(*) FROM document_chunks")).fetchone()[0]
+        except:
+            chunk_count = 0
+        
+        # Get knowledge base stats safely
+        try:
+            kb_stats = knowledge_service.get_stats(db)
+        except Exception as e:
+            print(f"⚠️ Warning: Could not get knowledge base stats: {str(e)}")
+            kb_stats = {"total_entries": 0, "categories": 0}
+        
+        return {
+            "questions": question_count,
+            "answers": answer_count,
+            "documents": document_count,
+            "chunks": chunk_count,
+            "knowledge_base": kb_stats,
+            "openai_configured": rag_service.openai_configured,
+            "version": "3.1.0 - Knowledge-Base-First Logic",
+            "response_priority": [
+                "1. Built-in Knowledge Base (fastest)",
+                "2. PDF Document Search", 
+                "3. Q&A Database Cache",
+                "4. ChatGPT Generation"
+            ]
         }
         
     except Exception as e:
-        print(f"❌ Error creating review: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating review: {str(e)}"
-        )
+        print(f"❌ Error getting stats: {str(e)}")
+        # Return basic stats even if there's an error
+        return {
+            "questions": 0,
+            "answers": 0,
+            "documents": 0,
+            "chunks": 0,
+            "knowledge_base": {"total_entries": 0, "categories": 0},
+            "openai_configured": rag_service.openai_configured,
+            "version": "3.1.0 - Knowledge-Base-First Logic",
+            "error": f"Error getting detailed stats: {str(e)}"
+        }
 
-@app.get("/reviews/queue")
-async def get_review_queue(
+@app.get("/qa-cache")
+async def get_qa_cache(
+    skip: int = 0,
+    limit: int = 20,
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """Get answers that need review"""
+    """Get cached Q&A pairs with error handling"""
     try:
-        # Get low confidence answers that need review
+        # Check if tables exist first
+        try:
+            table_check = db.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'questions'
+                ) AND EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'answers'
+                )
+            """))
+            tables_exist = table_check.fetchone()[0]
+            
+            if not tables_exist:
+                print("⚠️ Q&A tables do not exist, creating them...")
+                Base.metadata.create_all(bind=engine)
+                return {
+                    "qa_pairs": [],
+                    "total": 0,
+                    "message": "Q&A tables created, no cached pairs found"
+                }
+        except Exception as table_error:
+            print(f"❌ Error checking Q&A tables: {str(table_error)}")
+            # Continue anyway
+        
         result = db.execute(text("""
-            SELECT 
-                q.id as question_id,
-                q.text as question_text,
-                a.id as answer_id,
-                a.text as answer_text,
-                a.confidence_score,
-                a.created_at
+            SELECT q.id, q.text as question, q.created_at,
+                   a.text as answer, a.confidence_score, a.created_at as answer_date
             FROM questions q
             JOIN answers a ON q.id = a.question_id
-            WHERE a.confidence_score < 0.8
-            ORDER BY a.created_at DESC
-            LIMIT 20
-        """))
+            WHERE a.id = (
+                SELECT id FROM answers a2 
+                WHERE a2.question_id = q.id 
+                ORDER BY a2.created_at DESC 
+                LIMIT 1
+            )
+            ORDER BY q.created_at DESC
+            LIMIT :limit OFFSET :skip
+        """), {"limit": limit, "skip": skip})
         
-        queue_items = []
+        qa_pairs = []
         for row in result:
-            queue_items.append({
-                "question_id": row.question_id,
-                "question_text": row.question_text,
-                "answer_id": row.answer_id,
-                "answer_text": row.answer_text,
-                "confidence_score": float(row.confidence_score),
-                "created_at": row.created_at,
-                "needs_review": True
+            qa_pairs.append({
+                "question_id": row[0],
+                "question": row[1],
+                "question_date": row[2],
+                "answer": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
+                "confidence": float(row[4]),
+                "answer_date": row[5]
             })
         
-        return queue_items
-        
-    except Exception as e:
-        print(f"❌ Error getting review queue: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error getting review queue: {str(e)}"
-        )
-
-@app.post("/overrides")
-async def create_override(
-    override_data: dict,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """Create an override for an answer"""
-    try:
-        print(f"🔄 Creating override: {override_data}")
-        
-        # For now, just log the override - you can enhance this later
-        override_id = int(time.time())  # Simple ID generation
-        
         return {
-            "id": override_id,
-            "message": "Override created successfully",
-            "override_data": override_data,
-            "created_at": datetime.utcnow()
+            "qa_pairs": qa_pairs,
+            "total": len(qa_pairs),
+            "message": "Q&A cache retrieved successfully"
         }
         
     except Exception as e:
-        print(f"❌ Error creating override: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating override: {str(e)}"
-        )
+        print(f"❌ Error getting Q&A cache: {str(e)}")
+        return {
+            "qa_pairs": [],
+            "total": 0,
+            "message": f"Error retrieving Q&A cache: {str(e)}",
+            "error": str(e)
+        }
 
-@app.get("/overrides")
-async def list_overrides(
+@app.get("/debug/tables")
+async def debug_tables(
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
-    """List all overrides"""
+    """Debug endpoint to check which tables exist"""
     try:
-        # Return empty list for now - you can enhance this later
-        return []
+        result = db.execute(text("""
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+            ORDER BY table_name
+        """))
+        
+        tables = [row[0] for row in result]
+        
+        return {
+            "existing_tables": tables,
+            "total_tables": len(tables),
+            "message": f"Found {len(tables)} tables in database"
+        }
         
     except Exception as e:
-        print(f"❌ Error listing overrides: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error listing overrides: {str(e)}"
-        )
+        return {
+            "error": str(e),
+            "message": f"Error checking tables: {str(e)}"
+        }
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True
+    )
