@@ -1,6 +1,8 @@
 from typing import Dict, Any, List, Optional
 import logging
 from datetime import datetime
+from sqlalchemy.orm import Session
+import re  # Added for regex pattern matching
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -63,105 +65,83 @@ class NoAnswerHandler:
         logger.info(f"⚠️ Generated no-answer response for query: {query[:50]}...")
         return response
     
-    def suggest_related_questions(self, query: str, openai_service) -> List[str]:
-        """
-        Generate suggested alternative questions when no answer is found
-        
-        Parameters:
-        - query: The original query
-        - openai_service: Service for generating suggestions
-        
-        Returns:
-        - List of suggested questions
-        """
+    def suggest_related_questions(
+        self, 
+        original_question: str, 
+        rag_service
+    ) -> List[str]:
+        """Suggest related questions that might help the user"""
         try:
-            if hasattr(openai_service, 'openai_configured') and openai_service.openai_configured:
-                import openai
-                
-                prompt = f"""The user asked: "{query}"
-                
-                I couldn't find a good answer to this question. Please suggest 3 alternative questions that:
-                1. Are related to the original question
-                2. Might be more likely to have answers in a knowledge base
-                3. Are more specific or clearer
-                
-                Format your response as a simple list of questions, one per line.
-                """
-                
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a helpful assistant that suggests alternative questions."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=200,
-                    temperature=0.7
-                )
-                
-                suggestions_text = response['choices'][0]['message']['content'].strip()
-                
-                # Parse the suggestions (assuming one per line)
-                suggestions = [line.strip() for line in suggestions_text.split('\n') if line.strip()]
-                
-                # Remove any numbering or bullet points
-                suggestions = [re.sub(r'^[\d\-\*\•]+\.?\s*', '', q) for q in suggestions]
-                
-                # Remove quotes if present
-                suggestions = [q.strip('"\'') for q in suggestions]
-                
-                logger.info(f"✅ Generated {len(suggestions)} alternative questions")
-                return suggestions[:3]  # Limit to 3 suggestions
-                
-            else:
-                # Demo mode - create generic suggestions
-                base_suggestions = [
-                    f"What are the key characteristics of {query}?",
-                    f"Can you explain the history of {query}?",
-                    f"What are some examples of {query} in practice?"
-                ]
-                
-                logger.info(f"🎭 Generated demo alternative questions")
-                return base_suggestions
-                
+            # Generate alternative question suggestions
+            prompt = f"""Based on the question "{original_question}", suggest 3 related questions that might help the user find the information they're looking for. Make the suggestions more specific and actionable.
+
+Format as a simple list:
+1. [suggestion 1]
+2. [suggestion 2] 
+3. [suggestion 3]"""
+            
+            # This would use the RAG service to generate suggestions
+            # For now, return some generic helpful suggestions
+            suggestions = [
+                f"What specific aspect of '{original_question.split()[0] if original_question.split() else 'this topic'}' are you most interested in?",
+                f"Are you looking for general information or specific details about '{original_question.split()[-1] if original_question.split() else 'this topic'}'?",
+                f"Would you like to know about related topics or similar concepts?"
+            ]
+            
+            return suggestions
+            
         except Exception as e:
             logger.error(f"❌ Error generating question suggestions: {str(e)}")
-            
-            # Fallback suggestions
             return [
-                f"What is {query}?",
-                f"Can you provide more information about {query}?",
-                f"What are the main aspects of {query}?"
+                "Try rephrasing your question with more specific terms",
+                "Consider breaking down your question into smaller parts",
+                "Upload relevant documents that might contain the information you need"
             ]
     
-    def log_unanswered_question(self, db, query: str, search_attempts: List[str]) -> None:
-        """
-        Log questions that couldn't be answered for later analysis
-        
-        Parameters:
-        - db: Database session
-        - query: The original query
-        - search_attempts: List of places searched
-        """
+    def log_unanswered_question(
+        self, 
+        db: Session, 
+        question: str, 
+        search_attempts: List[str]
+    ) -> None:
+        """Log questions that couldn't be answered satisfactorily"""
         try:
-            # Import here to avoid circular imports
             from override_models import UnansweredQuestion
             
-            # Create record
             unanswered = UnansweredQuestion(
-                question_text=query,
+                question_text=question,
                 search_attempts=search_attempts,
-                created_at=datetime.utcnow()
+                timestamp=datetime.utcnow()
             )
             
             db.add(unanswered)
             db.commit()
             
-            logger.info(f"📝 Logged unanswered question: {query[:50]}...")
+            logger.info(f"📝 Logged unanswered question: {question[:50]}...")
             
         except Exception as e:
             logger.error(f"❌ Error logging unanswered question: {str(e)}")
-            # Don't raise - this is a non-critical operation
+    
+    def get_feedback_form_data(self, question: str) -> Dict[str, Any]:
+        """Get data for the feedback form when no answer is found"""
+        return {
+            "show_feedback_form": True,
+            "feedback_message": "We couldn't find a satisfactory answer to your question. Your feedback helps us improve!",
+            "feedback_options": [
+                {"value": "too_specific", "label": "Question was too specific"},
+                {"value": "too_broad", "label": "Question was too broad"},
+                {"value": "missing_context", "label": "Missing important context"},
+                {"value": "technical_issue", "label": "Technical issue with search"},
+                {"value": "other", "label": "Other (please specify)"}
+            ],
+            "suggestion_prompt": "What information were you hoping to find?",
+            "alternative_actions": [
+                "Upload relevant documents",
+                "Try a web search",
+                "Contact support",
+                "Browse knowledge base categories"
+            ]
+        }
 
-# Initialize the handler
-import re  # Added for regex pattern matching
+# Global instance
 no_answer_handler = NoAnswerHandler()
