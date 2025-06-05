@@ -11,7 +11,106 @@ class EnhancedCitationService:
     
     def __init__(self):
         """Initialize the citation service"""
-        logger.info("📚 Enhanced Citation Service initialized")
+        logger.info("📚 Initializing Enhanced Citation Service")
+    
+    def enhance_answer_with_citations(self, answer_text: str, source_type: str, source_info: Dict[str, Any]) -> str:
+        """
+        Enhance an answer with proper citations
+        
+        Args:
+            answer_text: The original answer text
+            source_type: The type of source (pdf, web, etc.)
+            source_info: Information about the sources
+            
+        Returns:
+            Enhanced answer with citations
+        """
+        try:
+            logger.info(f"📝 Enhancing answer with {source_type} citations")
+            
+            if source_type == "pdf":
+                return self._enhance_with_pdf_citations(answer_text, source_info)
+            elif source_type == "web":
+                return self._enhance_with_web_citations(answer_text, source_info)
+            else:
+                logger.warning(f"⚠️ Unknown source type: {source_type}")
+                return answer_text
+                
+        except Exception as e:
+            logger.error(f"❌ Error enhancing answer with citations: {str(e)}")
+            return answer_text
+    
+    def _enhance_with_pdf_citations(self, answer_text: str, source_info: Dict[str, Any]) -> str:
+        """Enhance answer with PDF citations including page numbers"""
+        try:
+            documents = source_info.get("documents", [])
+            chunks = source_info.get("chunks", [])
+            
+            if not documents or not chunks:
+                return answer_text
+            
+            # Extract page numbers from chunks
+            doc_pages = {}
+            for chunk in chunks:
+                filename = chunk.get("filename", "Unknown")
+                page_num = chunk.get("page_num", chunk.get("page", None))
+                
+                if filename not in doc_pages:
+                    doc_pages[filename] = set()
+                
+                if page_num is not None:
+                    doc_pages[filename].add(page_num)
+            
+            # Format citations
+            citations = []
+            for doc in documents:
+                if doc in doc_pages and doc_pages[doc]:
+                    pages = sorted(doc_pages[doc])
+                    page_str = ", ".join([str(p) for p in pages])
+                    citations.append(f"{doc} (pages {page_str})")
+                else:
+                    citations.append(doc)
+            
+            # Add citations to the answer
+            if citations:
+                citation_text = "\n\nSources:\n" + "\n".join([f"- {c}" for c in citations])
+                return answer_text + citation_text
+            
+            return answer_text
+            
+        except Exception as e:
+            logger.error(f"❌ Error enhancing with PDF citations: {str(e)}")
+            return answer_text
+    
+    def _enhance_with_web_citations(self, answer_text: str, source_info: Dict[str, Any]) -> str:
+        """Enhance answer with web citations including URLs"""
+        try:
+            sources = source_info.get("sources", [])
+            
+            if not sources:
+                return answer_text
+            
+            # Format citations
+            citations = []
+            for source in sources:
+                title = source.get("title", "Untitled")
+                url = source.get("url", "")
+                
+                if title and url:
+                    citations.append(f"{title} - {url}")
+                elif url:
+                    citations.append(url)
+            
+            # Add citations to the answer
+            if citations:
+                citation_text = "\n\nSources:\n" + "\n".join([f"- {c}" for c in citations])
+                return answer_text + citation_text
+            
+            return answer_text
+            
+        except Exception as e:
+            logger.error(f"❌ Error enhancing with web citations: {str(e)}")
+            return answer_text
     
     def format_pdf_citation(
         self, 
@@ -40,84 +139,832 @@ class EnhancedCitationService:
         """Format a citation for a knowledge base entry"""
         return f"[Knowledge Base: {category}, ID: {entry_id}]"
     
-    def enhance_answer_with_citations(
-        self, 
-        answer: str, 
-        source_type: str, 
-        source_info: Dict[str, Any]
-    ) -> str:
-        """Enhance an answer with proper citations based on source type"""
-        
-        if source_type == "pdf":
-            return self._add_pdf_citations(answer, source_info)
-        elif source_type == "web":
-            return self._add_web_citations(answer, source_info)
-        elif source_type == "knowledge_base":
-            return self._add_kb_citations(answer, source_info)
-        else:
-            return answer
     
-    def _add_pdf_citations(self, answer: str, source_info: Dict[str, Any]) -> str:
-        """Add PDF citations with document names and page numbers"""
-        documents = source_info.get("documents", [])
-        chunks = source_info.get("chunks", [])
-        
-        if not documents:
-            return answer
-        
-        # Extract page information from chunks
-        page_info = {}
-        for chunk in chunks:
-            filename = chunk.get('filename', 'Unknown')
-            page_num = chunk.get('page_number', 'Unknown')
-            if filename not in page_info:
-                page_info[filename] = set()
-            if page_num != 'Unknown':
-                page_info[filename].add(str(page_num))
-        
-        # Build citation text
-        citations = []
-        for doc in documents:
-            if doc in page_info and page_info[doc]:
-                pages = sorted(list(page_info[doc]))
-                if len(pages) == 1:
-                    citations.append(f"{doc} (page {pages[0]})")
-                else:
-                    citations.append(f"{doc} (pages {', '.join(pages)})")
-            else:
-                citations.append(f"{doc}")
-        
-        citation_text = "Sources: " + "; ".join(citations)
-        
-        return f"{answer}\n\n📄 {citation_text}"
     
-    def _add_web_citations(self, answer: str, source_info: Dict[str, Any]) -> str:
-        """Add web citations with URLs and titles"""
-        sources = source_info.get("sources", [])
-        
-        if not sources:
-            return answer
-        
-        citations = []
-        for i, source in enumerate(sources, 1):
-            title = source.get("title", "Web Source")
-            url = source.get("url", "")
-            citations.append(f"[{i}] {title}: {url}")
-        
-        citation_text = "\n".join(citations)
-        
-        return f"{answer}\n\n🌐 **Sources:**\n{citation_text}"
     
-    def _add_kb_citations(self, answer: str, source_info: Dict[str, Any]) -> str:
-        """Add knowledge base citations"""
-        category = source_info.get("category", "General")
-        kb_id = source_info.get("id", "")
-        
-        citation_text = f"Source: Knowledge Base - {category}"
-        if kb_id:
-            citation_text += f" (ID: {kb_id})"
-        
-        return f"{answer}\n\n🧠 {citation_text}"
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     
     def extract_page_numbers_from_chunks(self, chunks: List[Dict[str, Any]]) -> List[int]:
         """Extract unique page numbers from document chunks"""
@@ -149,5 +996,5 @@ class EnhancedCitationService:
         
         return sorted(list(set(page_numbers)))
 
-# Global instance
+# Create a singleton instance
 citation_service = EnhancedCitationService()
