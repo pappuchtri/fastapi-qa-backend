@@ -6,7 +6,8 @@ from datetime import datetime
 import enum
 from sqlalchemy import Enum
 
-Base = declarative_base()
+# Import Base from database instead of creating a new one
+from database import Base
 
 class Question(Base):
     __tablename__ = "questions"
@@ -19,6 +20,8 @@ class Question(Base):
     # Relationships
     answers = relationship("Answer", back_populates="question", cascade="all, delete-orphan")
     embeddings = relationship("Embedding", back_populates="question", cascade="all, delete-orphan")
+    # Add web_answers relationship but use string reference to avoid circular imports
+    web_answers = relationship("WebAnswer", back_populates="question")
 
 class Answer(Base):
     __tablename__ = "answers"
