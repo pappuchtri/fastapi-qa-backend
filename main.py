@@ -39,7 +39,7 @@ from schemas import (
 from feedback_schemas import FeedbackCreate, FeedbackResponse, QuestionSuggestion
 from rag_service import RAGService
 from simple_pdf_processor import SimplePDFProcessor
-from web_search_service import WebSearchService, web_search
+from ai_web_search_service import AIWebSearchService, ai_web_search
 from enhanced_citation_service import EnhancedCitationService, citation_service
 from feedback_handler import FeedbackHandler, feedback_handler
 from no_answer_handler import NoAnswerHandler, no_answer_handler
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Enhanced PDF RAG Q&A API with Web Search",
     description="A comprehensive FastAPI backend for PDF document processing, web search, and Q&A using RAG with user-controlled saving",
-    version="4.0.0",
+    version="4.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
@@ -223,13 +223,13 @@ async def root():
     """Root endpoint"""
     return {
         "message": "Enhanced PDF RAG Q&A API with Web Search",
-        "version": "4.0.0",
+        "version": "4.1.0",
         "status": "running",
-        "logic": "Knowledge Base → PDF search → Q&A database → Web search → ChatGPT",
+        "logic": "Knowledge Base → PDF search → Q&A database → AI Web search → ChatGPT",
         "features": [
             "Built-in knowledge base (fastest responses)",
             "PDF document processing and search",
-            "Web search integration",
+            "AI-native web search integration",
             "User-controlled answer saving",
             "Q&A database fallback",
             "ChatGPT-3.5 generation",
@@ -248,7 +248,7 @@ async def root():
             "suggest": "/suggest-questions",
             "documents": "/documents",
             "upload": "/documents/upload",
-            "web-search": "/web-search",
+            "ai-web-search": "/ai-web-search",
             "stats": "/stats",
             "qa-cache": "/qa-cache"
         }
@@ -409,32 +409,40 @@ async def ask_question(
                     "original_question": similar_question.text if similarity < 0.95 else None
                 }
         
-        # STEP 4: NEW - Search the web if no match found in KB, PDFs, or Q&A database
-        print("🌐 Step 4: No database match, searching the web...")
-        search_attempts.append("web search")
-        web_results = await web_search.search_web(question_text, num_results=5)
-        
-        if web_results:
-            print(f"✅ Found {len(web_results)} relevant web results")
+        # STEP 4: NEW - AI-native web search if no match found in KB, PDFs, or Q&A database
+        print("🤖 Step 4: No database match, performing AI-native web search...")
+        search_attempts.append("AI web search")
+
+        # Prepare context for AI web search
+        search_context = f"User is asking about: {question_text}"
+        if relevant_chunks:
+            search_context += f" (Some PDF context was found but not sufficient)"
+
+        web_search_result = await ai_web_search.search_web_with_ai(question_text, search_context)
+
+        if web_search_result.get("success", False):
+            print(f"✅ AI web search completed successfully")
             
-            # Generate answer from web results
-            web_answer = await web_search.generate_answer_from_web_results(
-                question_text, web_results, rag_service
+            # Generate enhanced answer with web context
+            enhanced_result = await ai_web_search.generate_answer_with_web_context(
+                question_text, web_search_result
             )
             
-            if web_answer["success"]:
+            if enhanced_result.get("success", False):
                 # Store web search results in database
                 stored_results = []
-                for result in web_results[:3]:  # Store top 3 results
+                sources = web_search_result.get("sources", [])
+                
+                for i, source in enumerate(sources[:3]):  # Store top 3 sources
                     try:
                         stored_result = create_web_search_result(
                             db,
                             question_text,
-                            result["title"],
-                            result["snippet"],
-                            result["url"],
-                            result["position"],
-                            result["source"]
+                            source.get("title", ""),
+                            source.get("snippet", ""),
+                            source.get("url", ""),
+                            i + 1,
+                            "ai_native"
                         )
                         stored_results.append(stored_result)
                     except Exception as e:
@@ -456,44 +464,38 @@ async def ask_question(
                         db,
                         new_question.id,
                         stored_results[0].id if stored_results else None,
-                        web_answer["answer"],
-                        web_answer["sources"],
-                        0.8  # Confidence score for web answers
+                        enhanced_result["answer"],
+                        [{"title": s.get("title", ""), "url": s.get("url", "")} for s in sources],
+                        enhanced_result.get("confidence", 0.8)
                     )
                 except Exception as e:
                     print(f"⚠️ Error storing web answer: {str(e)}")
                     web_answer_record = None
                 
-                # Enhance answer with proper citations
-                source_info = {
-                    "sources": web_answer["sources"]
-                }
-                enhanced_answer = citation_service.enhance_answer_with_citations(
-                    web_answer["answer"], "web", source_info
-                )
-                
                 generation_time = int((time.time() - start_time) * 1000)
                 
                 return {
-                    "answer": enhanced_answer,
+                    "answer": enhanced_result["answer"],
                     "question_id": new_question.id if new_question else None,
                     "answer_id": web_answer_record.id if web_answer_record else None,
                     "similarity_score": 0.0,
                     "is_cached": False,
                     "source_documents": [],
-                    "source_urls": [source["url"] for source in web_answer["sources"]],
-                    "answer_type": "web_search",
-                    "confidence_score": 0.8,
+                    "source_urls": [source.get("url", "") for source in sources],
+                    "answer_type": "ai_web_search",
+                    "confidence_score": enhanced_result.get("confidence", 0.8),
                     "generation_time_ms": generation_time,
                     "found_in_knowledge_base": False,
                     "found_in_pdf": False,
                     "found_on_web": True,
+                    "web_search_type": "ai_native",
                     "show_save_prompt": True,
-                    "save_prompt_message": "Do you want to save this web answer to the Q&A database?",
+                    "save_prompt_message": "Do you want to save this AI web search answer to the Q&A database?",
                     "temp_question": question_text,
-                    "temp_answer": enhanced_answer,
-                    "temp_sources": [source["url"] for source in web_answer["sources"]],
-                    "cache_hit": False
+                    "temp_answer": enhanced_result["answer"],
+                    "temp_sources": [source.get("url", "") for source in sources],
+                    "cache_hit": False,
+                    "search_summary": web_search_result.get("search_summary", "")
                 }
         
         # STEP 5: Final fallback to ChatGPT-3.5
@@ -904,14 +906,15 @@ async def get_stats(
             "chunks": chunk_count,
             "knowledge_base": kb_stats,
             "openai_configured": rag_service.openai_configured,
-            "version": "4.0.0 - Enhanced with Web Search",
+            "version": "4.1.0 - AI-Native Web Search",
             "response_priority": [
                 "1. Built-in Knowledge Base (fastest)",
                 "2. PDF Document Search", 
                 "3. Q&A Database Cache",
-                "4. Web Search",
+                "4. AI-Native Web Search",
                 "5. ChatGPT Generation"
-            ]
+            ],
+            "ai_web_search": ai_web_search.get_search_capabilities_info(),
         }
         
     except Exception as e:
@@ -924,7 +927,7 @@ async def get_stats(
             "chunks": 0,
             "knowledge_base": {"total_entries": 0, "categories": 0},
             "openai_configured": rag_service.openai_configured,
-            "version": "4.0.0 - Enhanced with Web Search",
+            "version": "4.1.0 - AI-Native Web Search",
             "error": f"Error getting detailed stats: {str(e)}"
         }
 
@@ -1008,6 +1011,49 @@ async def debug_tables(
             "error": str(e),
             "message": f"Error checking tables: {str(e)}"
         }
+
+@app.post("/ai-web-search")
+async def test_ai_web_search(
+    request: dict,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Test endpoint for AI-native web search functionality"""
+    try:
+        query = request.get("query", "").strip()
+        
+        if not query:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Query is required"
+            )
+        
+        print(f"🧪 Testing AI web search for: {query}")
+        
+        # Perform AI web search
+        search_result = await ai_web_search.search_web_with_ai(query)
+        
+        # Generate enhanced answer
+        enhanced_result = await ai_web_search.generate_answer_with_web_context(
+            query, search_result
+        )
+        
+        return {
+            "query": query,
+            "search_result": search_result,
+            "enhanced_answer": enhanced_result,
+            "capabilities": ai_web_search.get_search_capabilities_info(),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in AI web search test: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error testing AI web search: {str(e)}"
+        )
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
