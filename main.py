@@ -1,1065 +1,500 @@
-from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import text
-from typing import List, Optional
-import os
-import uuid
-from datetime import datetime
-import uvicorn
-from dotenv import load_dotenv
-import logging
+from sqlalchemy import text, func, desc, and_, or_
 from contextlib import asynccontextmanager
+import os
 import time
-from typing import Dict
+import logging
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+import json
+import hashlib
+import traceback
 
-# Load environment variables
-load_dotenv()
+# Database imports
+from database import SessionLocal, engine, Base, get_db
 
-# Import our modules - fix the import error
-from database import SessionLocal, engine, get_db, Base
-from models import Question, Answer, Embedding, AnswerOverride, AnswerReview
-from document_models import Document, DocumentChunk
-from feedback_models import AnswerFeedback
-from override_models import WebSearchResult, WebAnswer, KnowledgeBase, UnansweredQuestion
-from knowledge_base_service import knowledge_service
-from schemas import (
-    QuestionAnswerRequest, 
-    QuestionAnswerResponse, 
-    HealthResponse, 
-    AuthHealthResponse,
-    QuestionResponse,
-    AnswerResponse,
-    KnowledgeBaseCreate,
-    KnowledgeBaseResponse,
-    KnowledgeBaseUpdate,
-    KnowledgeBaseSearch
+# Model imports - now all from models.py
+from models import (
+    Question, Answer, Embedding, KnowledgeBase, User, AnswerOverride, 
+    AnswerReview, WebSearchResult, WebAnswer, UnansweredQuestion,
+    PerformanceCache, AuditLog, ReviewQueue
 )
-from feedback_schemas import FeedbackCreate, FeedbackResponse, QuestionSuggestion
-from rag_service import RAGService
-from simple_pdf_processor import SimplePDFProcessor
-from ai_web_search_service import AIWebSearchService, ai_web_search
-from enhanced_citation_service import EnhancedCitationService, citation_service
-from feedback_handler import FeedbackHandler, feedback_handler
-from no_answer_handler import NoAnswerHandler, no_answer_handler
 
-# Set up logging
+# Document models
+from document_models import Document, DocumentChunk
+
+# Schema imports
+from schemas import QuestionCreate, AnswerResponse, DocumentResponse
+from document_schemas import DocumentCreate, DocumentUpdate
+
+# Service imports
+from rag_service import RAGService
+from knowledge_base_service import KnowledgeBaseService
+from document_crud import DocumentCRUD
+from ai_web_search_service import AIWebSearchService
+from enhanced_citation_service import EnhancedCitationService
+from no_answer_handler import NoAnswerHandler
+from feedback_handler import FeedbackHandler
+
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize RAG service
+# Initialize services
 rag_service = RAGService()
+kb_service = KnowledgeBaseService()
+doc_crud = DocumentCRUD()
+web_search_service = AIWebSearchService()
+citation_service = EnhancedCitationService()
+no_answer_handler = NoAnswerHandler()
+feedback_handler = FeedbackHandler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    # Startup
-    logger.info("🚀 Starting Enhanced PDF RAG Q&A API with Web Search...")
-    
-    # Create database tables
     try:
+        logger.info("🚀 Starting FastAPI application...")
+        
+        # Create all database tables
+        logger.info("📊 Creating database tables...")
         Base.metadata.create_all(bind=engine)
-        logger.info("✅ Database tables created/verified")
+        logger.info("✅ Database tables created successfully")
+        
+        # Initialize knowledge base
+        logger.info("🧠 Initializing knowledge base...")
+        await kb_service.initialize_knowledge_base()
+        logger.info("✅ Knowledge base initialized")
+        
+        yield
+        
     except Exception as e:
-        logger.error(f"❌ Error creating database tables: {str(e)}")
-    
-    # Check DATABASE_URL
-    database_url = os.getenv("DATABASE_URL")
-    if database_url:
-        logger.info(f"📊 Database URL configured: {database_url[:30]}...")
-        try:
-            db = SessionLocal()
-            result = db.execute(text("SELECT 1"))
-            result.fetchone()
-            db.close()
-            logger.info("✅ Database connection successful!")
-        except Exception as e:
-            logger.error(f"❌ Database connection failed: {str(e)}")
-    else:
-        logger.error("❌ DATABASE_URL not configured!")
-    
-    # Check OpenAI
-    if os.getenv("OPENAI_API_KEY"):
-        logger.info("🤖 OpenAI API Key configured - RAG enabled")
-    else:
-        logger.info("🎭 Running in demo mode - RAG with mock responses")
-    
-    # Check Web Search API keys
-    if os.getenv("SERPAPI_KEY"):
-        logger.info("🌐 SerpAPI Key configured - Web search enabled")
-    elif os.getenv("GOOGLE_API_KEY") and os.getenv("GOOGLE_CX"):
-        logger.info("🌐 Google Custom Search API configured - Web search enabled")
-    else:
-        logger.info("🎭 No search API keys - Web search in demo mode")
-    
-    yield
-    
-    # Shutdown
-    logger.info("🛑 Shutting down Enhanced PDF RAG Q&A API...")
+        logger.error(f"❌ Error during startup: {e}")
+        logger.error(traceback.format_exc())
+        raise
+    finally:
+        logger.info("🛑 Shutting down FastAPI application...")
 
-# Initialize FastAPI app
+# Create FastAPI app with lifespan
 app = FastAPI(
-    title="Enhanced PDF RAG Q&A API with Web Search",
-    description="A comprehensive FastAPI backend for PDF document processing, web search, and Q&A using RAG with user-controlled saving",
-    version="4.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    title="Enhanced RAG System",
+    description="A comprehensive RAG system with Knowledge Base, PDF search, and AI web search",
+    version="2.0.0",
     lifespan=lifespan
 )
 
-# CORS middleware
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Security
-security = HTTPBearer()
-
-# API Keys for development/demo
-VALID_API_KEYS = {
-    "dev-api-key-123",
-    "test-api-key-456", 
-    "demo-key-789",
-    "qa-development-key",
-    "master-dev-key"
-}
-
-def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """Verify API key from Authorization header"""
-    api_key = credentials.credentials
-    
-    if api_key not in VALID_API_KEYS:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    return api_key
-
-# Direct CRUD operations (avoiding import issues)
-def create_question_direct(db: Session, question_text: str) -> Question:
-    """Create a new question directly"""
-    db_question = Question(text=question_text)
-    db.add(db_question)
-    db.commit()
-    db.refresh(db_question)
-    return db_question
-
-def create_answer_direct(db: Session, question_id: int, answer_text: str, confidence_score: float = 0.9) -> Answer:
-    """Create a new answer directly"""
-    db_answer = Answer(
-        question_id=question_id,
-        text=answer_text,
-        confidence_score=confidence_score
-    )
-    db.add(db_answer)
-    db.commit()
-    db.refresh(db_answer)
-    return db_answer
-
-def create_embedding_direct(db: Session, question_id: int, embedding_vector: List[float]) -> Embedding:
-    """Create a new embedding directly"""
-    db_embedding = Embedding(
-        question_id=question_id,
-        embedding=embedding_vector
-    )
-    db.add(db_embedding)
-    db.commit()
-    db.refresh(db_embedding)
-    return db_embedding
-
-def create_web_search_result(
-    db: Session, 
-    query: str, 
-    title: str, 
-    snippet: str, 
-    url: str, 
-    position: int, 
-    source: str
-) -> WebSearchResult:
-    """Create a new web search result"""
-    result = WebSearchResult(
-        query=query,
-        title=title,
-        snippet=snippet,
-        url=url,
-        position=position,
-        source=source
-    )
-    db.add(result)
-    db.commit()
-    db.refresh(result)
-    return result
-
-def create_web_answer(
-    db: Session, 
-    question_id: Optional[int], 
-    search_result_id: Optional[int], 
-    answer_text: str, 
-    sources: List[Dict[str, str]], 
-    confidence_score: float = 0.7
-) -> WebAnswer:
-    """Create a new web answer"""
-    answer = WebAnswer(
-        question_id=question_id,
-        search_result_id=search_result_id,
-        answer_text=answer_text,
-        sources=sources,
-        confidence_score=confidence_score
-    )
-    db.add(answer)
-    db.commit()
-    db.refresh(answer)
-    return answer
-
-@app.get("/", response_model=dict)
+@app.get("/")
 async def root():
-    """Root endpoint"""
-    return {
-        "message": "Enhanced PDF RAG Q&A API with Web Search",
-        "version": "4.1.0",
-        "status": "running",
-        "logic": "Knowledge Base → PDF search → Q&A database → AI Web search → ChatGPT",
-        "features": [
-            "Built-in knowledge base (fastest responses)",
-            "PDF document processing and search",
-            "AI-native web search integration",
-            "User-controlled answer saving",
-            "Q&A database fallback",
-            "ChatGPT-3.5 generation",
-            "Enhanced citations with page numbers",
-            "Answer feedback system",
-            "Question rephrasing suggestions",
-            "No-answer handling with suggestions"
-        ],
-        "endpoints": {
-            "health": "/health",
-            "ask": "/ask",
-            "save-answer": "/save-answer",
-            "knowledge-base": "/knowledge-base",
-            "knowledge-search": "/knowledge-base/search",
-            "feedback": "/feedback",
-            "suggest": "/suggest-questions",
-            "documents": "/documents",
-            "upload": "/documents/upload",
-            "ai-web-search": "/ai-web-search",
-            "stats": "/stats",
-            "qa-cache": "/qa-cache"
-        }
-    }
-
-@app.get("/health", response_model=HealthResponse)
-async def health_check(db: Session = Depends(get_db)):
-    """Health check endpoint"""
+    """Root endpoint with system status"""
     try:
-        db.execute(text("SELECT 1"))
-        database_connected = True
-    except Exception:
-        database_connected = False
-    
-    return HealthResponse(
-        status="healthy",
-        message="Enhanced RAG API is running with Web Search",
-        timestamp=datetime.utcnow(),
-        database_connected=database_connected,
-        openai_configured=rag_service.openai_configured
-    )
+        # Test database connection
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+            db_status = "✅ Connected"
+        except Exception as e:
+            db_status = f"❌ Error: {str(e)}"
+        finally:
+            db.close()
+        
+        # Check knowledge base
+        kb_count = await kb_service.get_knowledge_base_count()
+        
+        # Check documents
+        doc_count = await doc_crud.get_document_count()
+        
+        return {
+            "message": "Enhanced RAG System API",
+            "version": "2.0.0",
+            "status": "running",
+            "timestamp": datetime.utcnow().isoformat(),
+            "database": db_status,
+            "knowledge_base_entries": kb_count,
+            "documents": doc_count,
+            "features": {
+                "knowledge_base_search": True,
+                "pdf_document_search": True,
+                "ai_web_search": True,
+                "save_to_knowledge_base": True,
+                "enhanced_citations": True,
+                "feedback_system": True
+            },
+            "endpoints": {
+                "ask_question": "/ask",
+                "upload_document": "/upload",
+                "documents": "/documents",
+                "knowledge_base": "/knowledge-base",
+                "ai_web_search": "/ai-web-search",
+                "feedback": "/feedback"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error in root endpoint: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error", "details": str(e)}
+        )
 
 @app.post("/ask")
 async def ask_question(
-    request: QuestionAnswerRequest,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
+    question_data: QuestionCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
 ):
-    """
-    Ask a question with comprehensive search logic:
-    1. FIRST: Check built-in knowledge base (fastest, most accurate)
-    2. If not found: Search PDF documents using RAG
-    3. If not found: Check Q&A database for similar questions  
-    4. If not found: Search the web for information
-    5. If all fail: Use ChatGPT-3.5 as final fallback
+    """Enhanced question answering with multiple search strategies"""
+    start_time = time.time()
     
-    This ensures fastest response times and most accurate answers with proper source citations.
-    """
     try:
-        question_text = request.question.strip()
-        start_time = time.time()
-        search_attempts = []
-        
+        question_text = question_data.text.strip()
         if not question_text:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Question cannot be empty"
+            raise HTTPException(status_code=400, detail="Question cannot be empty")
+        
+        logger.info(f"🔍 Processing question: {question_text}")
+        
+        # Create question record
+        question = Question(text=question_text)
+        db.add(question)
+        db.commit()
+        db.refresh(question)
+        
+        # Step 1: Search Knowledge Base
+        logger.info("📚 Step 1: Searching Knowledge Base...")
+        kb_result = await kb_service.search_knowledge_base(question_text, db)
+        
+        if kb_result and kb_result.get("found"):
+            processing_time = int((time.time() - start_time) * 1000)
+            logger.info(f"✅ Found answer in Knowledge Base (took {processing_time}ms)")
+            
+            # Create answer record
+            answer = Answer(
+                question_id=question.id,
+                text=kb_result["answer"],
+                confidence_score=kb_result.get("confidence", 0.95)
+            )
+            db.add(answer)
+            db.commit()
+            
+            return AnswerResponse(
+                answer=kb_result["answer"],
+                source="knowledge_base",
+                confidence_score=kb_result.get("confidence", 0.95),
+                generation_time_ms=processing_time,
+                source_documents=[{
+                    "title": "Knowledge Base",
+                    "content": kb_result.get("category", "General"),
+                    "page": 1,
+                    "relevance_score": kb_result.get("confidence", 0.95)
+                }],
+                can_save_to_kb=False,
+                question_id=question.id
             )
         
-        print(f"🔍 Processing question with comprehensive search logic: {question_text[:50]}...")
-        
-        # STEP 1: FIRST, check built-in knowledge base (fastest, most accurate)
-        print("🧠 Step 1: Checking built-in knowledge base first...")
-        search_attempts.append("knowledge base")
-        kb_match = knowledge_service.get_best_knowledge_match(db, question_text)
-        
-        if kb_match:
-            print(f"✅ Found answer in knowledge base (score: {kb_match['relevance_score']:.3f})")
-            generation_time = int((time.time() - start_time) * 1000)
-            
-            return {
-                "answer": kb_match["answer"],
-                "question_id": None,  # Knowledge base entries don't have question IDs
-                "answer_id": None,
-                "similarity_score": kb_match["relevance_score"],
-                "is_cached": True,
-                "source_documents": [],
-                "answer_type": "knowledge_base",
-                "confidence_score": 0.95,  # High confidence for knowledge base
-                "generation_time_ms": generation_time,
-                "found_in_knowledge_base": True,
-                "knowledge_base_category": kb_match["category"],
-                "knowledge_base_id": kb_match["id"],
-                "show_save_prompt": False,  # Don't save knowledge base answers
-                "cache_hit": True,
-                "match_type": kb_match["match_type"]
-            }
-        
-        # Generate embedding for remaining steps
-        query_embedding = await rag_service.generate_embedding(question_text)
-        
-        # STEP 2: If not in knowledge base, search PDF documents
-        print("📄 Step 2: Knowledge base miss, searching PDF documents...")
-        search_attempts.append("PDF documents")
-        relevant_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
-        
-        if relevant_chunks:
-            print(f"✅ Found {len(relevant_chunks)} relevant chunks in PDF documents")
-            
-            # Generate answer from PDF content
-            answer_text = await rag_service.generate_answer_from_chunks(question_text, relevant_chunks)
-            
-            # Extract source documents and page numbers
-            source_docs = list(set([chunk.get('filename', 'Unknown') for chunk in relevant_chunks]))
-            
-            # Enhance answer with proper citations
-            source_info = {
-                "documents": source_docs,
-                "chunks": relevant_chunks
-            }
-            enhanced_answer = citation_service.enhance_answer_with_citations(
-                answer_text, "pdf", source_info
-            )
-            
-            generation_time = int((time.time() - start_time) * 1000)
-            
-            return {
-                "answer": enhanced_answer,
-                "question_id": None,  # Not saved yet
-                "answer_id": None,    # Not saved yet
-                "similarity_score": 0.0,
-                "is_cached": False,
-                "source_documents": source_docs,
-                "answer_type": "pdf_document",
-                "confidence_score": 0.9,
-                "generation_time_ms": generation_time,
-                "found_in_knowledge_base": False,
-                "found_in_pdf": True,
-                "show_save_prompt": True,
-                "save_prompt_message": "Do you want to save this answer to the Q&A database?",
-                "temp_question": question_text,
-                "temp_answer": enhanced_answer,
-                "temp_sources": source_docs,
-                "cache_hit": False
-            }
-        
-        # STEP 3: If not in PDF, check Q&A database
-        print("🗃️ Step 3: No PDF match, checking Q&A database...")
-        search_attempts.append("Q&A database")
-        similar_question, similarity = await rag_service.find_similar_question(db, query_embedding)
-        
-        if similar_question and similarity > 0.75:
-            print(f"✅ Found similar question in database (similarity: {similarity:.3f})")
-            
-            latest_answer = db.query(Answer).filter(
-                Answer.question_id == similar_question.id
-            ).order_by(Answer.created_at.desc()).first()
-            
-            if latest_answer:
-                generation_time = int((time.time() - start_time) * 1000)
-                
-                answer_type = "database_exact_match" if similarity > 0.95 else "database_adapted"
-                
-                return {
-                    "answer": latest_answer.text,
-                    "question_id": similar_question.id,
-                    "answer_id": latest_answer.id,
-                    "similarity_score": similarity,
-                    "is_cached": True,
-                    "source_documents": [],
-                    "answer_type": answer_type,
-                    "confidence_score": latest_answer.confidence_score,
-                    "generation_time_ms": generation_time,
-                    "found_in_knowledge_base": False,
-                    "found_in_pdf": False,
-                    "show_save_prompt": False,
-                    "cache_hit": True,
-                    "original_question": similar_question.text if similarity < 0.95 else None
-                }
-        
-        # STEP 4: NEW - AI-native web search if no match found in KB, PDFs, or Q&A database
-        print("🤖 Step 4: No database match, performing AI-native web search...")
-        search_attempts.append("AI web search")
-
-        # Prepare context for AI web search
-        search_context = f"User is asking about: {question_text}"
-        if relevant_chunks:
-            search_context += f" (Some PDF context was found but not sufficient)"
-
-        web_search_result = await ai_web_search.search_web_with_ai(question_text, search_context)
-
-        if web_search_result.get("success", False):
-            print(f"✅ AI web search completed successfully")
-            
-            # Generate enhanced answer with web context
-            enhanced_result = await ai_web_search.generate_answer_with_web_context(
-                question_text, web_search_result
-            )
-            
-            if enhanced_result.get("success", False):
-                # Store web search results in database
-                stored_results = []
-                sources = web_search_result.get("sources", [])
-                
-                for i, source in enumerate(sources[:3]):  # Store top 3 sources
-                    try:
-                        stored_result = create_web_search_result(
-                            db,
-                            question_text,
-                            source.get("title", ""),
-                            source.get("snippet", ""),
-                            source.get("url", ""),
-                            i + 1,
-                            "ai_native"
-                        )
-                        stored_results.append(stored_result)
-                    except Exception as e:
-                        print(f"⚠️ Error storing web result: {str(e)}")
-                
-                # Create question record
-                new_question = create_question_direct(db, question_text)
-                
-                # Store embedding
-                if query_embedding is not None:
-                    try:
-                        create_embedding_direct(db, new_question.id, query_embedding)
-                    except Exception as e:
-                        print(f"⚠️ Error storing embedding: {str(e)}")
-                
-                # Store web answer
-                try:
-                    web_answer_record = create_web_answer(
-                        db,
-                        new_question.id,
-                        stored_results[0].id if stored_results else None,
-                        enhanced_result["answer"],
-                        [{"title": s.get("title", ""), "url": s.get("url", "")} for s in sources],
-                        enhanced_result.get("confidence", 0.8)
-                    )
-                except Exception as e:
-                    print(f"⚠️ Error storing web answer: {str(e)}")
-                    web_answer_record = None
-                
-                generation_time = int((time.time() - start_time) * 1000)
-                
-                return {
-                    "answer": enhanced_result["answer"],
-                    "question_id": new_question.id if new_question else None,
-                    "answer_id": web_answer_record.id if web_answer_record else None,
-                    "similarity_score": 0.0,
-                    "is_cached": False,
-                    "source_documents": [],
-                    "source_urls": [source.get("url", "") for source in sources],
-                    "answer_type": "ai_web_search",
-                    "confidence_score": enhanced_result.get("confidence", 0.8),
-                    "generation_time_ms": generation_time,
-                    "found_in_knowledge_base": False,
-                    "found_in_pdf": False,
-                    "found_on_web": True,
-                    "web_search_type": "ai_native",
-                    "show_save_prompt": True,
-                    "save_prompt_message": "Do you want to save this AI web search answer to the Q&A database?",
-                    "temp_question": question_text,
-                    "temp_answer": enhanced_result["answer"],
-                    "temp_sources": [source.get("url", "") for source in sources],
-                    "cache_hit": False,
-                    "search_summary": web_search_result.get("search_summary", "")
-                }
-        
-        # STEP 5: Final fallback to ChatGPT-3.5
-        print("🤖 Step 5: Using ChatGPT-3.5 as final fallback...")
-        search_attempts.append("AI generation")
-        answer_text = await rag_service.generate_answer(question_text)
-        
-        generation_time = int((time.time() - start_time) * 1000)
-        
-        # If we got this far, we couldn't find a good answer anywhere
-        # Log the unanswered question for later analysis
+        # Step 2: Search PDF Documents
+        logger.info("📄 Step 2: Searching PDF Documents...")
         try:
-            no_answer_handler.log_unanswered_question(db, question_text, search_attempts)
+            pdf_result = await rag_service.get_answer(question_text, db)
+            
+            if pdf_result and pdf_result.get("answer") and pdf_result.get("source_documents"):
+                processing_time = int((time.time() - start_time) * 1000)
+                logger.info(f"✅ Found answer in PDF documents (took {processing_time}ms)")
+                
+                # Create answer record
+                answer = Answer(
+                    question_id=question.id,
+                    text=pdf_result["answer"],
+                    confidence_score=pdf_result.get("confidence_score", 0.8)
+                )
+                db.add(answer)
+                db.commit()
+                
+                # Enhanced citations for PDF sources
+                enhanced_sources = citation_service.enhance_pdf_citations(
+                    pdf_result.get("source_documents", [])
+                )
+                
+                return AnswerResponse(
+                    answer=pdf_result["answer"],
+                    source="document",
+                    confidence_score=pdf_result.get("confidence_score", 0.8),
+                    generation_time_ms=processing_time,
+                    source_documents=enhanced_sources,
+                    can_save_to_kb=True,
+                    question_id=question.id
+                )
         except Exception as e:
-            print(f"⚠️ Error logging unanswered question: {str(e)}")
+            logger.warning(f"PDF search failed: {e}")
         
-        # Generate alternative question suggestions
-        alternative_questions = no_answer_handler.suggest_related_questions(question_text, rag_service)
+        # Step 3: Search Q&A Database
+        logger.info("🗃️ Step 3: Searching Q&A Database...")
+        try:
+            similar_questions = db.query(Question).join(Answer).filter(
+                Question.text.ilike(f"%{question_text}%")
+            ).limit(3).all()
+            
+            if similar_questions:
+                best_match = similar_questions[0]
+                best_answer = best_match.answers[0] if best_match.answers else None
+                
+                if best_answer:
+                    processing_time = int((time.time() - start_time) * 1000)
+                    logger.info(f"✅ Found similar answer in Q&A database (took {processing_time}ms)")
+                    
+                    return AnswerResponse(
+                        answer=best_answer.text,
+                        source="database",
+                        confidence_score=0.7,
+                        generation_time_ms=processing_time,
+                        source_documents=[{
+                            "title": "Q&A Database",
+                            "content": f"Similar question: {best_match.text}",
+                            "page": 1,
+                            "relevance_score": 0.7
+                        }],
+                        can_save_to_kb=True,
+                        question_id=question.id
+                    )
+        except Exception as e:
+            logger.warning(f"Database search failed: {e}")
         
-        return {
-            "answer": answer_text,
-            "question_id": None,
-            "answer_id": None,
-            "similarity_score": 0.0,
-            "is_cached": False,
-            "source_documents": [],
-            "answer_type": "chatgpt_generated",
-            "confidence_score": 0.7,
-            "generation_time_ms": generation_time,
-            "found_in_knowledge_base": False,
-            "found_in_pdf": False,
-            "found_on_web": False,
-            "show_save_prompt": True,
-            "save_prompt_message": "Do you want to save this answer to the Q&A database?",
-            "temp_question": question_text,
-            "temp_answer": answer_text,
-            "temp_sources": [],
-            "cache_hit": False,
-            "search_attempts": search_attempts,
-            "alternative_questions": alternative_questions,
-            "show_feedback_form": True
-        }
+        # Step 4: AI Web Search
+        logger.info("🌐 Step 4: Performing AI Web Search...")
+        try:
+            web_result = await web_search_service.search_web(question_text, db)
+            
+            if web_result and web_result.get("answer"):
+                processing_time = int((time.time() - start_time) * 1000)
+                logger.info(f"✅ Found answer via AI web search (took {processing_time}ms)")
+                
+                # Create answer record
+                answer = Answer(
+                    question_id=question.id,
+                    text=web_result["answer"],
+                    confidence_score=web_result.get("confidence_score", 0.75)
+                )
+                db.add(answer)
+                db.commit()
+                
+                # Enhanced citations for web sources
+                enhanced_sources = citation_service.enhance_web_citations(
+                    web_result.get("sources", [])
+                )
+                
+                return AnswerResponse(
+                    answer=web_result["answer"],
+                    source="ai_web_search",
+                    confidence_score=web_result.get("confidence_score", 0.75),
+                    generation_time_ms=processing_time,
+                    source_documents=enhanced_sources,
+                    web_sources=web_result.get("sources", []),
+                    can_save_to_kb=True,
+                    question_id=question.id
+                )
+        except Exception as e:
+            logger.warning(f"AI web search failed: {e}")
+        
+        # Step 5: Fallback to ChatGPT
+        logger.info("🤖 Step 5: Fallback to ChatGPT...")
+        try:
+            gpt_result = await rag_service.get_chatgpt_fallback(question_text)
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            # Create answer record
+            answer = Answer(
+                question_id=question.id,
+                text=gpt_result,
+                confidence_score=0.6
+            )
+            db.add(answer)
+            db.commit()
+            
+            logger.info(f"✅ Generated ChatGPT response (took {processing_time}ms)")
+            
+            return AnswerResponse(
+                answer=gpt_result,
+                source="chatgpt",
+                confidence_score=0.6,
+                generation_time_ms=processing_time,
+                source_documents=[],
+                can_save_to_kb=True,
+                question_id=question.id
+            )
+        except Exception as e:
+            logger.error(f"ChatGPT fallback failed: {e}")
+        
+        # Step 6: No answer found
+        logger.warning("❌ No answer found from any source")
+        processing_time = int((time.time() - start_time) * 1000)
+        
+        # Log unanswered question
+        await no_answer_handler.log_unanswered_question(question_text, db)
+        
+        # Get suggestions
+        suggestions = await no_answer_handler.get_suggestions(question_text, db)
+        
+        return AnswerResponse(
+            answer="I couldn't find a specific answer to your question. You might try rephrasing your question or checking if there are any typos.",
+            source="no_answer",
+            confidence_score=0.0,
+            generation_time_ms=processing_time,
+            source_documents=[],
+            can_save_to_kb=False,
+            question_id=question.id,
+            suggestions=suggestions
+        )
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error processing question: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing question: {str(e)}"
-        )
+        logger.error(f"Error processing question: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 
-@app.post("/save-answer")
-async def save_answer_to_database(
-    save_request: dict,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
+@app.post("/save-to-kb")
+async def save_to_knowledge_base(
+    data: dict,
+    db: Session = Depends(get_db)
 ):
-    """
-    Save an answer to the Q&A database when user clicks 'Yes'
-    """
+    """Save an answer to the knowledge base"""
     try:
-        print(f"📥 Received save request: {save_request}")
-        
-        question_text = save_request.get("question")
-        answer_text = save_request.get("answer")
-        answer_type = save_request.get("answer_type", "user_saved")
-        confidence_score = save_request.get("confidence_score", 0.9)
-        source_urls = save_request.get("source_urls", [])
-        
-        print(f"📝 Extracted data - Question: {question_text[:50] if question_text else 'None'}...")
-        print(f"📝 Answer length: {len(answer_text) if answer_text else 0}")
-        print(f"📝 Answer type: {answer_type}")
-        print(f"📝 Confidence: {confidence_score}")
+        question_text = data.get("question")
+        answer_text = data.get("answer")
+        category = data.get("category", "General")
         
         if not question_text or not answer_text:
-            print("❌ Missing question or answer text")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Question and answer are required"
-            )
+            raise HTTPException(status_code=400, detail="Question and answer are required")
         
-        print(f"💾 User chose to save answer for: {question_text[:50]}...")
-        
-        # Generate embedding for the question
-        print("🔄 Generating embedding...")
-        try:
-            query_embedding = await rag_service.generate_embedding(question_text)
-            print(f"✅ Generated embedding with length: {len(query_embedding) if query_embedding else 0}")
-        except Exception as e:
-            print(f"❌ Error generating embedding: {str(e)}")
-            # Continue without embedding for now
-            query_embedding = []
-        
-        # Create question record using direct method
-        print("🔄 Creating question record...")
-        try:
-            new_question = create_question_direct(db, question_text)
-            print(f"✅ Created question with ID: {new_question.id}")
-        except Exception as e:
-            print(f"❌ Error creating question: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error creating question: {str(e)}"
-            )
-        
-        # Store embedding if we have one
-        if query_embedding:
-            print("🔄 Storing embedding...")
-            try:
-                create_embedding_direct(db, new_question.id, query_embedding)
-                print("✅ Embedding stored successfully")
-            except Exception as e:
-                print(f"⚠️ Warning: Could not store embedding: {str(e)}")
-                # Continue without embedding
-        
-        # Create answer record using direct method
-        print("🔄 Creating answer record...")
-        try:
-            new_answer = create_answer_direct(
-                db, 
-                new_question.id,
-                answer_text,
-                confidence_score
-            )
-            print(f"✅ Created answer with ID: {new_answer.id}")
-        except Exception as e:
-            print(f"❌ Error creating answer: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error creating answer: {str(e)}"
-            )
-        
-        # Store source URLs if available (for web answers)
-        if source_urls and answer_type == "web_search":
-            try:
-                # Store as WebAnswer for better tracking
-                web_answer = WebAnswer(
-                    question_id=new_question.id,
-                    answer_text=answer_text,
-                    sources=[{"url": url} for url in source_urls],
-                    confidence_score=confidence_score
-                )
-                db.add(web_answer)
-                db.commit()
-                print(f"✅ Stored web answer sources: {source_urls}")
-            except Exception as e:
-                print(f"⚠️ Warning: Could not store web sources: {str(e)}")
-        
-        print(f"✅ Answer saved to database: Q{new_question.id}, A{new_answer.id}")
-        
-        return {
-            "message": "Answer saved successfully to Q&A database",
-            "question_id": new_question.id,
-            "answer_id": new_answer.id,
-            "saved_at": datetime.utcnow().isoformat(),
-            "success": True
-        }
-        
-    except HTTPException as he:
-        print(f"❌ HTTP Exception in save-answer: {he.detail}")
-        raise he
-    except Exception as e:
-        print(f"❌ Unexpected error saving answer: {str(e)}")
-        print(f"❌ Error type: {type(e).__name__}")
-        import traceback
-        print(f"❌ Traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error saving answer: {str(e)}"
+        # Save to knowledge base
+        result = await kb_service.add_to_knowledge_base(
+            question=question_text,
+            answer=answer_text,
+            category=category,
+            db=db
         )
-
-# Document Management Endpoints - Fixed to prevent 404
-@app.get("/documents")
-async def list_documents(
-    skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """List all uploaded documents with enhanced error handling"""
-    try:
-        print("🔍 Fetching documents from database...")
         
-        # Ensure tables exist
-        try:
-            Base.metadata.create_all(bind=engine)
-            print("✅ Database tables verified/created")
-        except Exception as table_error:
-            print(f"⚠️ Warning creating tables: {str(table_error)}")
-        
-        # Get total count safely
-        try:
-            count_result = db.execute(text("SELECT COUNT(*) FROM documents"))
-            total_count = count_result.fetchone()[0]
-            print(f"📊 Total documents in database: {total_count}")
-        except Exception as count_error:
-            print(f"❌ Error getting document count: {str(count_error)}")
-            # Table might not exist, return empty result
-            return {
-                "documents": [],
-                "total": 0,
-                "message": "Documents table not found or empty",
-                "debug_info": {
-                    "table_exists": False,
-                    "total_count": 0,
-                    "error": str(count_error)
-                }
-            }
-        
-        if total_count == 0:
-            print("⚠️ No documents found in database")
-            return {
-                "documents": [],
-                "total": 0,
-                "message": "No documents found in database",
-                "debug_info": {
-                    "table_exists": True,
-                    "total_count": 0,
-                    "query_executed": True
-                }
-            }
-        
-        # Fetch documents with detailed logging
-        try:
-            result = db.execute(text("""
-                SELECT id, filename, original_filename, file_size, 
-                       content_type, upload_date, processed, processing_status,
-                       total_pages, total_chunks
-                FROM documents 
-                ORDER BY upload_date DESC
-                LIMIT :limit OFFSET :skip
-            """), {"limit": limit, "skip": skip})
-            
-            documents = []
-            for row in result:
-                doc = {
-                    "id": row[0],
-                    "filename": row[1],
-                    "original_filename": row[2],
-                    "file_size": row[3],
-                    "content_type": row[4],
-                    "upload_date": row[5].isoformat() if row[5] else None,
-                    "processed": row[6],
-                    "processing_status": row[7],
-                    "total_pages": row[8],
-                    "total_chunks": row[9]
-                }
-                documents.append(doc)
-                print(f"📄 Found document: {doc['original_filename']} (ID: {doc['id']})")
-            
-            print(f"✅ Successfully fetched {len(documents)} documents")
-            
-            return {
-                "documents": documents,
-                "total": total_count,
-                "message": f"Successfully retrieved {len(documents)} documents",
-                "debug_info": {
-                    "table_exists": True,
-                    "total_count": total_count,
-                    "returned_count": len(documents),
-                    "query_executed": True,
-                    "skip": skip,
-                    "limit": limit
-                }
-            }
-            
-        except Exception as query_error:
-            print(f"❌ Error executing documents query: {str(query_error)}")
-            return {
-                "documents": [],
-                "total": 0,
-                "message": f"Error querying documents: {str(query_error)}",
-                "debug_info": {
-                    "table_exists": True,
-                    "query_executed": False,
-                    "error": str(query_error)
-                }
-            }
+        return {"success": True, "message": "Answer saved to knowledge base", "id": result.id}
         
     except Exception as e:
-        print(f"❌ Unexpected error listing documents: {str(e)}")
-        return {
-            "documents": [],
-            "total": 0,
-            "message": f"Error retrieving documents: {str(e)}",
-            "debug_info": {
-                "table_exists": False,
-                "error": str(e),
-                "query_executed": False
-            }
-        }
+        logger.error(f"Error saving to knowledge base: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/documents/upload")
+@app.post("/upload")
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
+    title: str = Form(...),
+    description: str = Form(""),
+    db: Session = Depends(get_db)
 ):
-    """Upload and process a PDF document"""
+    """Upload and process a document"""
     try:
-        # Validate file type
         if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only PDF files are supported"
-            )
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
         
         # Read file content
-        file_content = await file.read()
+        content = await file.read()
         
-        if len(file_content) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Empty file uploaded"
-            )
-        
-        # Generate unique filename
-        file_extension = os.path.splitext(file.filename)[1]
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        
-        print(f"📤 Uploading document: {file.filename} ({len(file_content)} bytes)")
-        
-        # Ensure tables exist
-        Base.metadata.create_all(bind=engine)
-        
-        # Insert document record
-        document = Document(
-            filename=unique_filename,
-            original_filename=file.filename,
-            file_size=len(file_content),
-            content_type="application/pdf",
-            processing_status="uploaded"
+        # Create document record
+        document_data = DocumentCreate(
+            title=title,
+            description=description,
+            filename=file.filename,
+            content_type=file.content_type or "application/pdf"
         )
         
-        db.add(document)
-        db.commit()
-        db.refresh(document)
-        
-        print(f"✅ Document saved to database with ID: {document.id}")
-        
-        # Process PDF in background
-        pdf_processor = SimplePDFProcessor(rag_service)
-        background_tasks.add_task(
-            pdf_processor.process_pdf_content,
-            db,
-            document.id,
-            file_content
-        )
+        # Process document
+        result = await doc_crud.create_document(db, document_data, content)
         
         return {
-            "message": "Document uploaded successfully and processing started",
-            "document_id": document.id,
-            "filename": file.filename,
-            "file_size": len(file_content),
-            "processing_status": "uploaded"
+            "success": True,
+            "message": "Document uploaded and processed successfully",
+            "document_id": result.id,
+            "chunks_created": result.chunk_count
         }
         
-    except HTTPException:
-        raise
     except Exception as e:
-        print(f"❌ Error uploading document: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error uploading document: {str(e)}"
-        )
+        logger.error(f"Error uploading document: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/stats")
-async def get_stats(
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """Get API statistics including knowledge base"""
+@app.get("/documents")
+async def get_documents(db: Session = Depends(get_db)):
+    """Get all documents"""
     try:
-        # Use safe queries with error handling
-        try:
-            question_count = db.execute(text("SELECT COUNT(*) FROM questions")).fetchone()[0]
-        except:
-            question_count = 0
-            
-        try:
-            answer_count = db.execute(text("SELECT COUNT(*) FROM answers")).fetchone()[0]
-        except:
-            answer_count = 0
-            
-        try:
-            document_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
-        except:
-            document_count = 0
-            
-        try:
-            chunk_count = db.execute(text("SELECT COUNT(*) FROM document_chunks")).fetchone()[0]
-        except:
-            chunk_count = 0
-        
-        # Get knowledge base stats safely
-        try:
-            kb_stats = knowledge_service.get_stats(db)
-        except Exception as e:
-            print(f"⚠️ Warning: Could not get knowledge base stats: {str(e)}")
-            kb_stats = {"total_entries": 0, "categories": 0}
-        
+        documents = await doc_crud.get_documents(db)
         return {
-            "questions": question_count,
-            "answers": answer_count,
-            "documents": document_count,
-            "chunks": chunk_count,
-            "knowledge_base": kb_stats,
-            "openai_configured": rag_service.openai_configured,
-            "version": "4.1.0 - AI-Native Web Search",
-            "response_priority": [
-                "1. Built-in Knowledge Base (fastest)",
-                "2. PDF Document Search", 
-                "3. Q&A Database Cache",
-                "4. AI-Native Web Search",
-                "5. ChatGPT Generation"
-            ],
-            "ai_web_search": ai_web_search.get_search_capabilities_info(),
+            "documents": [
+                {
+                    "id": doc.id,
+                    "title": doc.title,
+                    "description": doc.description,
+                    "filename": doc.filename,
+                    "upload_date": doc.upload_date.isoformat(),
+                    "chunk_count": doc.chunk_count
+                }
+                for doc in documents
+            ]
         }
-        
     except Exception as e:
-        print(f"❌ Error getting stats: {str(e)}")
-        # Return basic stats even if there's an error
-        return {
-            "questions": 0,
-            "answers": 0,
-            "documents": 0,
-            "chunks": 0,
-            "knowledge_base": {"total_entries": 0, "categories": 0},
-            "openai_configured": rag_service.openai_configured,
-            "version": "4.1.0 - AI-Native Web Search",
-            "error": f"Error getting detailed stats: {str(e)}"
-        }
+        logger.error(f"Error fetching documents: {e}")
+        return {"documents": []}
 
-@app.get("/qa-cache")
-async def get_qa_cache(
-    skip: int = 0,
-    limit: int = 20,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """Get cached Q&A pairs with error handling"""
+@app.get("/knowledge-base")
+async def get_knowledge_base(db: Session = Depends(get_db)):
+    """Get knowledge base entries"""
     try:
-        # Ensure tables exist
-        Base.metadata.create_all(bind=engine)
-        
-        result = db.execute(text("""
-            SELECT q.id, q.text as question, q.created_at,
-                   a.text as answer, a.confidence_score, a.created_at as answer_date
-            FROM questions q
-            JOIN answers a ON q.id = a.question_id
-            WHERE a.id = (
-                SELECT id FROM answers a2 
-                WHERE a2.question_id = q.id 
-                ORDER BY a2.created_at DESC 
-                LIMIT 1
-            )
-            ORDER BY q.created_at DESC
-            LIMIT :limit OFFSET :skip
-        """), {"limit": limit, "skip": skip})
-        
-        qa_pairs = []
-        for row in result:
-            qa_pairs.append({
-                "question_id": row[0],
-                "question": row[1],
-                "question_date": row[2],
-                "answer": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
-                "confidence": float(row[4]),
-                "answer_date": row[5]
-            })
-        
+        entries = await kb_service.get_all_entries(db)
         return {
-            "qa_pairs": qa_pairs,
-            "total": len(qa_pairs),
-            "message": "Q&A cache retrieved successfully"
+            "entries": [
+                {
+                    "id": entry.id,
+                    "category": entry.category,
+                    "question": entry.question,
+                    "answer": entry.answer,
+                    "priority": entry.priority,
+                    "created_at": entry.created_at.isoformat()
+                }
+                for entry in entries
+            ]
         }
-        
     except Exception as e:
-        print(f"❌ Error getting Q&A cache: {str(e)}")
-        return {
-            "qa_pairs": [],
-            "total": 0,
-            "message": f"Error retrieving Q&A cache: {str(e)}",
-            "error": str(e)
-        }
-
-@app.get("/debug/tables")
-async def debug_tables(
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """Debug endpoint to check which tables exist"""
-    try:
-        result = db.execute(text("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public'
-            ORDER BY table_name
-        """))
-        
-        tables = [row[0] for row in result]
-        
-        return {
-            "existing_tables": tables,
-            "total_tables": len(tables),
-            "message": f"Found {len(tables)} tables in database"
-        }
-        
-    except Exception as e:
-        return {
-            "error": str(e),
-            "message": f"Error checking tables: {str(e)}"
-        }
+        logger.error(f"Error fetching knowledge base: {e}")
+        return {"entries": []}
 
 @app.post("/ai-web-search")
-async def test_ai_web_search(
-    request: dict,
-    db: Session = Depends(get_db),
-    api_key: str = Depends(verify_api_key)
-):
-    """Test endpoint for AI-native web search functionality"""
+async def ai_web_search(data: dict, db: Session = Depends(get_db)):
+    """Test AI web search functionality"""
     try:
-        query = request.get("query", "").strip()
-        
+        query = data.get("query")
         if not query:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Query is required"
-            )
+            raise HTTPException(status_code=400, detail="Query is required")
         
-        print(f"🧪 Testing AI web search for: {query}")
+        result = await web_search_service.search_web(query, db)
+        return result
         
-        # Perform AI web search
-        search_result = await ai_web_search.search_web_with_ai(query)
-        
-        # Generate enhanced answer
-        enhanced_result = await ai_web_search.generate_answer_with_web_context(
-            query, search_result
-        )
-        
-        return {
-            "query": query,
-            "search_result": search_result,
-            "enhanced_answer": enhanced_result,
-            "capabilities": ai_web_search.get_search_capabilities_info(),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-    except HTTPException:
-        raise
     except Exception as e:
-        print(f"❌ Error in AI web search test: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error testing AI web search: {str(e)}"
-        )
+        logger.error(f"Error in AI web search: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/feedback")
+async def submit_feedback(data: dict, db: Session = Depends(get_db)):
+    """Submit user feedback"""
+    try:
+        result = await feedback_handler.submit_feedback(data, db)
+        return {"success": True, "message": "Feedback submitted successfully", "id": result.id}
+        
+    except Exception as e:
+        logger.error(f"Error submitting feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=True
-    )
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
