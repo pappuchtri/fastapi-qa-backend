@@ -19,7 +19,6 @@ class Question(Base):
     # Relationships
     answers = relationship("Answer", back_populates="question", cascade="all, delete-orphan")
     embeddings = relationship("Embedding", back_populates="question", cascade="all, delete-orphan")
-    overrides = relationship("AnswerOverride", back_populates="question")
 
 class Answer(Base):
     __tablename__ = "answers"
@@ -33,7 +32,6 @@ class Answer(Base):
     
     # Relationships
     question = relationship("Question", back_populates="answers")
-    overrides = relationship("AnswerOverride", back_populates="original_answer")
 
 class Embedding(Base):
     __tablename__ = "embeddings"
@@ -108,9 +106,9 @@ class AnswerOverride(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
     
-    # Relationships
-    question = relationship("Question", back_populates="overrides")
-    original_answer = relationship("Answer", back_populates="overrides")
+    # Relationships using string references to avoid circular imports
+    question = relationship("Question")
+    original_answer = relationship("Answer")
 
 class AnswerReview(Base):
     __tablename__ = "answer_reviews"
@@ -132,3 +130,6 @@ class AnswerReview(Base):
     # Relationships
     question = relationship("Question")
     answer = relationship("Answer")
+
+# Add ReviewQueue as an alias for AnswerReview for backward compatibility
+ReviewQueue = AnswerReview
