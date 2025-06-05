@@ -48,18 +48,9 @@ from schemas import (
     DocumentResponse
 )
 
-# Remove this line:
-# from document_schemas import DocumentCreate, DocumentUpdate
-
 # Service imports - only import existing services
 from rag_service import RAGService
-from knowledge_base_service import knowledge_service
-# Remove these imports for now since the files don't exist:
-# from document_crud import DocumentCRUD
-# from ai_web_search_service import AIWebSearchService
-# from enhanced_citation_service import EnhancedCitationService
-# from no_answer_handler import NoAnswerHandler
-# from feedback_handler import FeedbackHandler
+from knowledge_base_service import knowledge_service  # This is already an instance
 from feedback_models import AnswerFeedback
 from feedback_schemas import FeedbackCreate, FeedbackResponse, QuestionSuggestion
 from simple_pdf_processor import SimplePDFProcessor
@@ -70,12 +61,8 @@ logger = logging.getLogger(__name__)
 
 # Initialize services
 rag_service = RAGService()
-kb_service = knowledge_service()
-# doc_crud = DocumentCRUD()
-# web_search_service = AIWebSearchService()
-# citation_service = EnhancedCitationService()
-# no_answer_handler = NoAnswerHandler()
-# feedback_handler = FeedbackHandler()
+# knowledge_service is already imported as an instance, don't call it
+kb_service = knowledge_service
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -270,29 +257,33 @@ async def ask_question(
         # STEP 1: Check built-in knowledge base
         print("🧠 Step 1: Checking built-in knowledge base...")
         search_attempts.append("knowledge base")
-        kb_match = knowledge_service.get_best_knowledge_match(db, question_text)
         
-        if kb_match:
-            print(f"✅ Found answer in knowledge base (score: {kb_match['relevance_score']:.3f})")
-            generation_time = int((time.time() - start_time) * 1000)
+        try:
+            kb_match = kb_service.get_best_knowledge_match(db, question_text)
             
-            return {
-                "answer": kb_match["answer"],
-                "question_id": None,
-                "answer_id": None,
-                "similarity_score": kb_match["relevance_score"],
-                "is_cached": True,
-                "source_documents": [],
-                "answer_type": "knowledge_base",
-                "confidence_score": 0.95,
-                "generation_time_ms": generation_time,
-                "found_in_knowledge_base": True,
-                "knowledge_base_category": kb_match["category"],
-                "knowledge_base_id": kb_match["id"],
-                "show_save_prompt": False,
-                "cache_hit": True,
-                "match_type": kb_match["match_type"]
-            }
+            if kb_match:
+                print(f"✅ Found answer in knowledge base (score: {kb_match['relevance_score']:.3f})")
+                generation_time = int((time.time() - start_time) * 1000)
+                
+                return {
+                    "answer": kb_match["answer"],
+                    "question_id": None,
+                    "answer_id": None,
+                    "similarity_score": kb_match["relevance_score"],
+                    "is_cached": True,
+                    "source_documents": [],
+                    "answer_type": "knowledge_base",
+                    "confidence_score": 0.95,
+                    "generation_time_ms": generation_time,
+                    "found_in_knowledge_base": True,
+                    "knowledge_base_category": kb_match["category"],
+                    "knowledge_base_id": kb_match["id"],
+                    "show_save_prompt": False,
+                    "cache_hit": True,
+                    "match_type": kb_match["match_type"]
+                }
+        except Exception as e:
+            print(f"⚠️ Knowledge base search failed: {str(e)}")
         
         # Generate embedding for remaining steps
         query_embedding = await rag_service.generate_embedding(question_text)
@@ -300,15 +291,84 @@ async def ask_question(
         # STEP 2: Search PDF documents
         print("📄 Step 2: Searching PDF documents...")
         search_attempts.append("PDF documents")
-        relevant_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
         
-        if relevant_chunks:
-            print(f"✅ Found {len(relevant_chunks)} relevant chunks in PDF documents")
+        try:
+            relevant_chunks = await rag_service.search_document_chunks(db, query_embedding, limit=5)
             
-            # Generate answer from PDF content
-            answer_text = await rag_service.generate_answer_from_chunks(question_text, relevant_chunks)
-            source_docs = list(set([chunk.get('filename', 'Unknown') for chunk in relevant_chunks]))
+            if relevant_chunks:
+                print(f"✅ Found {len(relevant_chunks)} relevant chunks in PDF documents")
+                
+                # Generate answer from PDF content
+                answer_text = await rag_service.generate_answer_from_chunks(question_text, relevant_chunks)
+                source_docs = list(set([chunk.get('filename', 'Unknown') for chunk in relevant_chunks]))
+                
+                generation_time = int((time.time() - start_time) * 1000)
+                
+                return {
+                    "answer": answer_text,
+                    "question_id": None,
+                    "answer_id": None,
+                    "similarity_score": 0.0,
+                    "is_cached": False,
+                    "source_documents": source_docs,
+                    "answer_type": "pdf_document",
+                    "confidence_score": 0.9,
+                    "generation_time_ms": generation_time,
+                    "found_in_knowledge_base": False,
+                    "found_in_pdf": True,
+                    "show_save_prompt": True,
+                    "save_prompt_message": "Do you want to save this answer to the Q&A database?",
+                    "temp_question": question_text,
+                    "temp_answer": answer_text,
+                    "temp_sources": source_docs,
+                    "cache_hit": False
+                }
+        except Exception as e:
+            print(f"⚠️ PDF search failed: {str(e)}")
+        
+        # STEP 3: Check Q&A database
+        print("🗃️ Step 3: Checking Q&A database...")
+        search_attempts.append("Q&A database")
+        
+        try:
+            similar_question, similarity = await rag_service.find_similar_question(db, query_embedding)
             
+            if similar_question and similarity > 0.75:
+                print(f"✅ Found similar question in database (similarity: {similarity:.3f})")
+                
+                latest_answer = db.query(Answer).filter(
+                    Answer.question_id == similar_question.id
+                ).order_by(Answer.created_at.desc()).first()
+                
+                if latest_answer:
+                    generation_time = int((time.time() - start_time) * 1000)
+                    answer_type = "database_exact_match" if similarity > 0.95 else "database_adapted"
+                    
+                    return {
+                        "answer": latest_answer.text,
+                        "question_id": similar_question.id,
+                        "answer_id": latest_answer.id,
+                        "similarity_score": similarity,
+                        "is_cached": True,
+                        "source_documents": [],
+                        "answer_type": answer_type,
+                        "confidence_score": latest_answer.confidence_score,
+                        "generation_time_ms": generation_time,
+                        "found_in_knowledge_base": False,
+                        "found_in_pdf": False,
+                        "show_save_prompt": False,
+                        "cache_hit": True,
+                        "original_question": similar_question.text if similarity < 0.95 else None
+                    }
+        except Exception as e:
+            print(f"⚠️ Database search failed: {str(e)}")
+        
+        # STEP 4: Fallback to ChatGPT
+        print("🤖 Step 4: Using ChatGPT as fallback...")
+        search_attempts.append("AI generation")
+        
+        try:
+            answer_text = await rag_service.generate_answer(question_text)
             generation_time = int((time.time() - start_time) * 1000)
             
             return {
@@ -317,80 +377,43 @@ async def ask_question(
                 "answer_id": None,
                 "similarity_score": 0.0,
                 "is_cached": False,
-                "source_documents": source_docs,
-                "answer_type": "pdf_document",
-                "confidence_score": 0.9,
+                "source_documents": [],
+                "answer_type": "chatgpt_generated",
+                "confidence_score": 0.7,
                 "generation_time_ms": generation_time,
                 "found_in_knowledge_base": False,
-                "found_in_pdf": True,
+                "found_in_pdf": False,
                 "show_save_prompt": True,
                 "save_prompt_message": "Do you want to save this answer to the Q&A database?",
                 "temp_question": question_text,
                 "temp_answer": answer_text,
-                "temp_sources": source_docs,
-                "cache_hit": False
+                "temp_sources": [],
+                "cache_hit": False,
+                "search_attempts": search_attempts
             }
-        
-        # STEP 3: Check Q&A database
-        print("🗃️ Step 3: Checking Q&A database...")
-        search_attempts.append("Q&A database")
-        similar_question, similarity = await rag_service.find_similar_question(db, query_embedding)
-        
-        if similar_question and similarity > 0.75:
-            print(f"✅ Found similar question in database (similarity: {similarity:.3f})")
+        except Exception as e:
+            print(f"⚠️ ChatGPT generation failed: {str(e)}")
             
-            latest_answer = db.query(Answer).filter(
-                Answer.question_id == similar_question.id
-            ).order_by(Answer.created_at.desc()).first()
+            # Final fallback - return a helpful message
+            generation_time = int((time.time() - start_time) * 1000)
             
-            if latest_answer:
-                generation_time = int((time.time() - start_time) * 1000)
-                answer_type = "database_exact_match" if similarity > 0.95 else "database_adapted"
-                
-                return {
-                    "answer": latest_answer.text,
-                    "question_id": similar_question.id,
-                    "answer_id": latest_answer.id,
-                    "similarity_score": similarity,
-                    "is_cached": True,
-                    "source_documents": [],
-                    "answer_type": answer_type,
-                    "confidence_score": latest_answer.confidence_score,
-                    "generation_time_ms": generation_time,
-                    "found_in_knowledge_base": False,
-                    "found_in_pdf": False,
-                    "show_save_prompt": False,
-                    "cache_hit": True,
-                    "original_question": similar_question.text if similarity < 0.95 else None
-                }
-        
-        # STEP 4: Fallback to ChatGPT
-        print("🤖 Step 4: Using ChatGPT as fallback...")
-        search_attempts.append("AI generation")
-        answer_text = await rag_service.generate_answer(question_text)
-        
-        generation_time = int((time.time() - start_time) * 1000)
-        
-        return {
-            "answer": answer_text,
-            "question_id": None,
-            "answer_id": None,
-            "similarity_score": 0.0,
-            "is_cached": False,
-            "source_documents": [],
-            "answer_type": "chatgpt_generated",
-            "confidence_score": 0.7,
-            "generation_time_ms": generation_time,
-            "found_in_knowledge_base": False,
-            "found_in_pdf": False,
-            "show_save_prompt": True,
-            "save_prompt_message": "Do you want to save this answer to the Q&A database?",
-            "temp_question": question_text,
-            "temp_answer": answer_text,
-            "temp_sources": [],
-            "cache_hit": False,
-            "search_attempts": search_attempts
-        }
+            return {
+                "answer": "I'm sorry, I couldn't find an answer to your question. Please try rephrasing your question or check if there are any typos.",
+                "question_id": None,
+                "answer_id": None,
+                "similarity_score": 0.0,
+                "is_cached": False,
+                "source_documents": [],
+                "answer_type": "no_answer",
+                "confidence_score": 0.0,
+                "generation_time_ms": generation_time,
+                "found_in_knowledge_base": False,
+                "found_in_pdf": False,
+                "show_save_prompt": False,
+                "cache_hit": False,
+                "search_attempts": search_attempts,
+                "error": "All search methods failed"
+            }
         
     except HTTPException:
         raise
@@ -633,7 +656,7 @@ async def get_stats(
         
         # Get knowledge base stats safely
         try:
-            kb_stats = knowledge_service.get_stats(db)
+            kb_stats = kb_service.get_stats(db)
         except Exception as e:
             kb_stats = {"total_entries": 0, "categories": 0}
         
