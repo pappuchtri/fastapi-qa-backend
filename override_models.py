@@ -1,9 +1,10 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Enum, Float
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Enum, Float, JSON, ARRAY
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
 import enum
 from models import Question, Answer  # Import the models we need to reference
+from typing import List, Optional
 
 class OverrideStatus(enum.Enum):
     ACTIVE = "active"
@@ -160,3 +161,67 @@ class AuditLog(Base):
     
     # Relationships
     user = relationship("User")
+
+class UnansweredQuestion(Base):
+    """Model for tracking questions that couldn't be answered"""
+    __tablename__ = "unanswered_questions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    question_text = Column(String, nullable=False)
+    search_attempts = Column(ARRAY(String), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved = Column(Boolean, default=False)
+    resolution_notes = Column(String, nullable=True)
+
+class WebSearchResult(Base):
+    """Model for storing web search results"""
+    __tablename__ = "web_search_results"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    query = Column(String, nullable=False)
+    title = Column(String, nullable=True)
+    snippet = Column(Text, nullable=True)
+    url = Column(String, nullable=True)
+    position = Column(Integer, nullable=True)
+    source = Column(String, nullable=True)  # e.g., "serpapi", "google_cse"
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationship to WebAnswer
+    answers = relationship("WebAnswer", back_populates="search_result")
+
+class WebAnswer(Base):
+    """Model for storing answers generated from web search results"""
+    __tablename__ = "web_answers"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, ForeignKey("questions.id"), nullable=True)
+    search_result_id = Column(Integer, ForeignKey("web_search_results.id"), nullable=True)
+    answer_text = Column(Text, nullable=False)
+    sources = Column(JSON, nullable=True)  # Store source URLs and titles
+    confidence_score = Column(Float, default=0.7)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    question = relationship("Question", back_populates="web_answers")
+    search_result = relationship("WebSearchResult", back_populates="answers")
+
+class KnowledgeBase(Base):
+    """Model for the built-in knowledge base"""
+    __tablename__ = "knowledge_base"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    category = Column(String, nullable=False)
+    question = Column(String, nullable=False)
+    answer = Column(Text, nullable=False)
+    keywords = Column(ARRAY(String), nullable=True)
+    priority = Column(Integer, default=1)  # 1-10, higher = more important
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_by = Column(String, default="system")
+
+# Add web_answers relationship to Question model
+Question.web_answers = relationship("WebAnswer", back_populates="question")
+
+# Define ReviewQueue as an alias for AnswerReview for backward compatibility
+ReviewQueue = AnswerReview
