@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float, ARRAY
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, ForeignKey, LargeBinary
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -13,9 +14,9 @@ class Document(Base):
     content_type = Column(String(100), nullable=False)
     upload_date = Column(DateTime, default=datetime.utcnow)
     processed = Column(Boolean, default=False)
-    processing_status = Column(String(50), default="pending")
-    total_pages = Column(Integer, default=0)
-    total_chunks = Column(Integer, default=0)
+    processing_status = Column(String(50), default="uploaded")
+    total_pages = Column(Integer, nullable=True)
+    total_chunks = Column(Integer, nullable=True)
     error_message = Column(Text, nullable=True)
     
     # Relationships
@@ -26,9 +27,9 @@ class DocumentChunk(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
-    page_number = Column(Integer, nullable=False)
-    chunk_number = Column(Integer, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
+    page_number = Column(Integer, nullable=True)
     chunk_embedding = Column(ARRAY(Float), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
