@@ -27,15 +27,19 @@ class EnhancedRAGService:
             return [0.0] * 1536  # OpenAI embeddings are 1536 dimensions
         
         try:
-            response = openai.Embedding.create(
-                model="text-embedding-ada-002",
-                input=text
-            )
-            return response["data"][0]["embedding"]
-        except Exception as e:
-            print(f"Error generating embedding: {str(e)}")
-            # Return mock embedding on error
-            return [0.0] * 1536
+            # Use the new OpenAI client (v1.0+)
+            from openai import OpenAI
+            client = OpenAI(api_key=self.openai_api_key)
+        
+        response = client.embeddings.create(
+            model="text-embedding-ada-002",
+            input=text
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        print(f"Error generating embedding: {str(e)}")
+        # Return mock embedding on error
+        return [0.0] * 1536
     
     async def find_similar_question(self, db: Session, query_embedding: List[float]) -> Tuple[Any, float]:
         """Find semantically similar question in database using Python-based similarity"""
@@ -154,9 +158,13 @@ class EnhancedRAGService:
                 "complexity": "medium",
                 "keywords": question.lower().split()[:5]
             }
-        
+    
         try:
-            response = openai.ChatCompletion.create(
+            # Use the new OpenAI client (v1.0+)
+            from openai import OpenAI
+            client = OpenAI(api_key=self.openai_api_key)
+        
+            response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {
@@ -176,9 +184,9 @@ class EnhancedRAGService:
                 max_tokens=200,
                 temperature=0.3
             )
-            
-            analysis_text = response['choices'][0]['message']['content'].strip()
-            
+        
+            analysis_text = response.choices[0].message.content.strip()
+        
             # Parse JSON response
             import json
             try:
@@ -192,7 +200,7 @@ class EnhancedRAGService:
                     "complexity": "medium",
                     "keywords": question.lower().split()[:5]
                 }
-                
+            
         except Exception as e:
             print(f"Error analyzing question: {str(e)}")
             # Return default analysis on error
@@ -264,7 +272,10 @@ class EnhancedRAGService:
             
             if self.openai_configured:
                 # Use OpenAI to generate answer from document context
-                response = openai.ChatCompletion.create(
+                from openai import OpenAI
+                client = OpenAI(api_key=self.openai_api_key)
+                
+                response = client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[
                         {
@@ -282,7 +293,7 @@ class EnhancedRAGService:
                     max_tokens=800,
                     temperature=0.3
                 )
-                answer_text = response['choices'][0]['message']['content'].strip()
+                answer_text = response.choices[0].message.content.strip()
                 confidence = 0.95  # High confidence for document-based answers
             else:
                 # Demo mode - show document context
@@ -312,9 +323,13 @@ class EnhancedRAGService:
         """Generate answer using GPT when no document context is available"""
         if not self.openai_configured:
             return f"""⚠️ **No relevant documents found for your question.**\n\nI don't have specific information about "{question}" in the uploaded documents.\n\n*Note: This is demo mode. With OpenAI configured, this would be a GPT-generated answer.*"""
-        
+    
         try:
-            response = openai.ChatCompletion.create(
+            # Use the new OpenAI client (v1.0+)
+            from openai import OpenAI
+            client = OpenAI(api_key=self.openai_api_key)
+        
+            response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {
@@ -329,8 +344,8 @@ class EnhancedRAGService:
                 max_tokens=500,
                 temperature=0.7
             )
-            
-            return response['choices'][0]['message']['content'].strip()
+        
+            return response.choices[0].message.content.strip()
         except Exception as e:
             print(f"Error generating answer: {str(e)}")
             return f"I apologize, but I encountered an error while trying to answer your question. Please try again later."
