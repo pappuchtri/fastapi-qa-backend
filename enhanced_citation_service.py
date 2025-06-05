@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class EnhancedCitationService:
-    """Service for formatting and enhancing citations from various sources"""
+    """Service for enhancing answers with proper citations"""
     
     def __init__(self):
         """Initialize the citation service"""
@@ -42,102 +42,82 @@ class EnhancedCitationService:
     
     def enhance_answer_with_citations(
         self, 
-        answer_text: str, 
-        source_type: str,
+        answer: str, 
+        source_type: str, 
         source_info: Dict[str, Any]
     ) -> str:
-        """
-        Enhance an answer with properly formatted citations
+        """Enhance an answer with proper citations based on source type"""
         
-        Parameters:
-        - answer_text: The original answer text
-        - source_type: Type of source ("pdf", "web", "kb")
-        - source_info: Dictionary with source information
+        if source_type == "pdf":
+            return self._add_pdf_citations(answer, source_info)
+        elif source_type == "web":
+            return self._add_web_citations(answer, source_info)
+        elif source_type == "knowledge_base":
+            return self._add_kb_citations(answer, source_info)
+        else:
+            return answer
+    
+    def _add_pdf_citations(self, answer: str, source_info: Dict[str, Any]) -> str:
+        """Add PDF citations with document names and page numbers"""
+        documents = source_info.get("documents", [])
+        chunks = source_info.get("chunks", [])
         
-        Returns:
-        - Enhanced answer text with citations
-        """
-        try:
-            if source_type == "pdf":
-                # Format PDF citations
-                documents = source_info.get("documents", [])
-                if not documents:
-                    return answer_text
-                
-                # Check if answer already has citations
-                if any(f"[{doc}]" in answer_text for doc in documents):
-                    # Already has citations, just ensure they're properly formatted
-                    return answer_text
-                
-                # Add citation footer
-                citations = []
-                for doc_info in source_info.get("chunks", []):
-                    doc_name = doc_info.get("filename", "Unknown")
-                    page_num = doc_info.get("page_number")
-                    chunk_idx = doc_info.get("chunk_index")
-                    
-                    citation = self.format_pdf_citation(doc_name, page_num, chunk_idx)
-                    if citation not in citations:
-                        citations.append(citation)
-                
-                if citations:
-                    citation_text = "\n\nSources:\n" + "\n".join(citations)
-                    return answer_text + citation_text
-                
-                return answer_text
-                
-            elif source_type == "web":
-                # Format web citations
-                sources = source_info.get("sources", [])
-                if not sources:
-                    return answer_text
-                
-                # Check if answer already has citations
-                has_citations = False
-                for source in sources:
-                    if source.get("url", "") in answer_text:
-                        has_citations = True
-                        break
-                
-                if has_citations:
-                    # Already has citations, just ensure they're properly formatted
-                    return answer_text
-                
-                # Add citation footer
-                citations = []
-                for source in sources:
-                    title = source.get("title", "Unknown")
-                    url = source.get("url", "")
-                    
-                    citation = self.format_web_citation(title, url)
-                    if citation not in citations:
-                        citations.append(citation)
-                
-                if citations:
-                    citation_text = "\n\nSources:\n" + "\n".join(citations)
-                    return answer_text + citation_text
-                
-                return answer_text
-                
-            elif source_type == "kb":
-                # Knowledge base entries don't typically need citations
-                # But we can add a subtle reference if desired
-                category = source_info.get("category", "General")
-                entry_id = source_info.get("id", 0)
-                
-                if entry_id > 0:
-                    footer = f"\n\n(From Knowledge Base: {category})"
-                    return answer_text + footer
-                
-                return answer_text
-                
+        if not documents:
+            return answer
+        
+        # Extract page information from chunks
+        page_info = {}
+        for chunk in chunks:
+            filename = chunk.get('filename', 'Unknown')
+            page_num = chunk.get('page_number', 'Unknown')
+            if filename not in page_info:
+                page_info[filename] = set()
+            if page_num != 'Unknown':
+                page_info[filename].add(str(page_num))
+        
+        # Build citation text
+        citations = []
+        for doc in documents:
+            if doc in page_info and page_info[doc]:
+                pages = sorted(list(page_info[doc]))
+                if len(pages) == 1:
+                    citations.append(f"{doc} (page {pages[0]})")
+                else:
+                    citations.append(f"{doc} (pages {', '.join(pages)})")
             else:
-                # Unknown source type, return original
-                return answer_text
-                
-        except Exception as e:
-            logger.error(f"❌ Error enhancing answer with citations: {str(e)}")
-            return answer_text
+                citations.append(f"{doc}")
+        
+        citation_text = "Sources: " + "; ".join(citations)
+        
+        return f"{answer}\n\n📄 {citation_text}"
+    
+    def _add_web_citations(self, answer: str, source_info: Dict[str, Any]) -> str:
+        """Add web citations with URLs and titles"""
+        sources = source_info.get("sources", [])
+        
+        if not sources:
+            return answer
+        
+        citations = []
+        for i, source in enumerate(sources, 1):
+            title = source.get("title", "Web Source")
+            url = source.get("url", "")
+            citations.append(f"[{i}] {title}: {url}")
+        
+        citation_text = "\n".join(citations)
+        
+        return f"{answer}\n\n🌐 **Sources:**\n{citation_text}"
+    
+    def _add_kb_citations(self, answer: str, source_info: Dict[str, Any]) -> str:
+        """Add knowledge base citations"""
+        category = source_info.get("category", "General")
+        kb_id = source_info.get("id", "")
+        
+        citation_text = f"Source: Knowledge Base - {category}"
+        if kb_id:
+            citation_text += f" (ID: {kb_id})"
+        
+        return f"{answer}\n\n🧠 {citation_text}"
     
     def extract_page_numbers_from_chunks(self, chunks: List[Dict[str, Any]]) -> List[int]:
         """Extract unique page numbers from document chunks"""
@@ -151,6 +131,23 @@ class EnhancedCitationService:
                 page_numbers.append(page)
         
         return sorted(page_numbers)
+    
+    def extract_page_numbers_from_text(self, text: str) -> List[int]:
+        """Extract page numbers from text content"""
+        # Look for patterns like "page 5", "p. 10", "pg 15", etc.
+        patterns = [
+            r'page\s+(\d+)',
+            r'p\.\s*(\d+)',
+            r'pg\s+(\d+)',
+            r'page\s*(\d+)'
+        ]
+        
+        page_numbers = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            page_numbers.extend([int(match) for match in matches])
+        
+        return sorted(list(set(page_numbers)))
 
-# Initialize the service
+# Global instance
 citation_service = EnhancedCitationService()
