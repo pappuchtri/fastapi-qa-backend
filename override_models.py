@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
 import enum
+from models import Question, Answer  # Import the models we need to reference
 
 class OverrideStatus(enum.Enum):
     ACTIVE = "active"
