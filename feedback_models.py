@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, ForeignKey
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -16,6 +16,6 @@ class AnswerFeedback(Base):
     user_session = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Relationships
-    question = relationship("models.Question")
-    answer = relationship("models.Answer")
+    # Relationships - using string references to avoid circular imports
+    question = relationship("Question")
+    answer = relationship("Answer")
