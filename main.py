@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import logging
 from contextlib import asynccontextmanager
 import time
+from typing import Dict
 
 # Load environment variables
 load_dotenv()
@@ -737,4 +738,282 @@ async def list_documents(
                     "content_type": row[4],
                     "upload_date": row[5].isoformat() if row[5] else None,
                     "processed": row[6],
-                    "processing_
+                    "processing_status": row[7],
+                    "total_pages": row[8],
+                    "total_chunks": row[9]
+                }
+                documents.append(doc)
+                print(f"📄 Found document: {doc['original_filename']} (ID: {doc['id']})")
+            
+            print(f"✅ Successfully fetched {len(documents)} documents")
+            
+            return {
+                "documents": documents,
+                "total": total_count,
+                "message": f"Successfully retrieved {len(documents)} documents",
+                "debug_info": {
+                    "table_exists": True,
+                    "total_count": total_count,
+                    "returned_count": len(documents),
+                    "query_executed": True,
+                    "skip": skip,
+                    "limit": limit
+                }
+            }
+            
+        except Exception as query_error:
+            print(f"❌ Error executing documents query: {str(query_error)}")
+            return {
+                "documents": [],
+                "total": 0,
+                "message": f"Error querying documents: {str(query_error)}",
+                "debug_info": {
+                    "table_exists": True,
+                    "query_executed": False,
+                    "error": str(query_error)
+                }
+            }
+        
+    except Exception as e:
+        print(f"❌ Unexpected error listing documents: {str(e)}")
+        return {
+            "documents": [],
+            "total": 0,
+            "message": f"Error retrieving documents: {str(e)}",
+            "debug_info": {
+                "table_exists": False,
+                "error": str(e),
+                "query_executed": False
+            }
+        }
+
+@app.post("/documents/upload")
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Upload and process a PDF document"""
+    try:
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are supported"
+            )
+        
+        # Read file content
+        file_content = await file.read()
+        
+        if len(file_content) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Empty file uploaded"
+            )
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        
+        print(f"📤 Uploading document: {file.filename} ({len(file_content)} bytes)")
+        
+        # Ensure tables exist
+        Base.metadata.create_all(bind=engine)
+        
+        # Insert document record
+        document = Document(
+            filename=unique_filename,
+            original_filename=file.filename,
+            file_size=len(file_content),
+            content_type="application/pdf",
+            processing_status="uploaded"
+        )
+        
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+        
+        print(f"✅ Document saved to database with ID: {document.id}")
+        
+        # Process PDF in background
+        pdf_processor = SimplePDFProcessor(rag_service)
+        background_tasks.add_task(
+            pdf_processor.process_pdf_content,
+            db,
+            document.id,
+            file_content
+        )
+        
+        return {
+            "message": "Document uploaded successfully and processing started",
+            "document_id": document.id,
+            "filename": file.filename,
+            "file_size": len(file_content),
+            "processing_status": "uploaded"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error uploading document: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading document: {str(e)}"
+        )
+
+@app.get("/stats")
+async def get_stats(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get API statistics including knowledge base"""
+    try:
+        # Use safe queries with error handling
+        try:
+            question_count = db.execute(text("SELECT COUNT(*) FROM questions")).fetchone()[0]
+        except:
+            question_count = 0
+            
+        try:
+            answer_count = db.execute(text("SELECT COUNT(*) FROM answers")).fetchone()[0]
+        except:
+            answer_count = 0
+            
+        try:
+            document_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
+        except:
+            document_count = 0
+            
+        try:
+            chunk_count = db.execute(text("SELECT COUNT(*) FROM document_chunks")).fetchone()[0]
+        except:
+            chunk_count = 0
+        
+        # Get knowledge base stats safely
+        try:
+            kb_stats = knowledge_service.get_stats(db)
+        except Exception as e:
+            print(f"⚠️ Warning: Could not get knowledge base stats: {str(e)}")
+            kb_stats = {"total_entries": 0, "categories": 0}
+        
+        return {
+            "questions": question_count,
+            "answers": answer_count,
+            "documents": document_count,
+            "chunks": chunk_count,
+            "knowledge_base": kb_stats,
+            "openai_configured": rag_service.openai_configured,
+            "version": "4.0.0 - Enhanced with Web Search",
+            "response_priority": [
+                "1. Built-in Knowledge Base (fastest)",
+                "2. PDF Document Search", 
+                "3. Q&A Database Cache",
+                "4. Web Search",
+                "5. ChatGPT Generation"
+            ]
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting stats: {str(e)}")
+        # Return basic stats even if there's an error
+        return {
+            "questions": 0,
+            "answers": 0,
+            "documents": 0,
+            "chunks": 0,
+            "knowledge_base": {"total_entries": 0, "categories": 0},
+            "openai_configured": rag_service.openai_configured,
+            "version": "4.0.0 - Enhanced with Web Search",
+            "error": f"Error getting detailed stats: {str(e)}"
+        }
+
+@app.get("/qa-cache")
+async def get_qa_cache(
+    skip: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get cached Q&A pairs with error handling"""
+    try:
+        # Ensure tables exist
+        Base.metadata.create_all(bind=engine)
+        
+        result = db.execute(text("""
+            SELECT q.id, q.text as question, q.created_at,
+                   a.text as answer, a.confidence_score, a.created_at as answer_date
+            FROM questions q
+            JOIN answers a ON q.id = a.question_id
+            WHERE a.id = (
+                SELECT id FROM answers a2 
+                WHERE a2.question_id = q.id 
+                ORDER BY a2.created_at DESC 
+                LIMIT 1
+            )
+            ORDER BY q.created_at DESC
+            LIMIT :limit OFFSET :skip
+        """), {"limit": limit, "skip": skip})
+        
+        qa_pairs = []
+        for row in result:
+            qa_pairs.append({
+                "question_id": row[0],
+                "question": row[1],
+                "question_date": row[2],
+                "answer": row[3][:200] + "..." if len(row[3]) > 200 else row[3],
+                "confidence": float(row[4]),
+                "answer_date": row[5]
+            })
+        
+        return {
+            "qa_pairs": qa_pairs,
+            "total": len(qa_pairs),
+            "message": "Q&A cache retrieved successfully"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting Q&A cache: {str(e)}")
+        return {
+            "qa_pairs": [],
+            "total": 0,
+            "message": f"Error retrieving Q&A cache: {str(e)}",
+            "error": str(e)
+        }
+
+@app.get("/debug/tables")
+async def debug_tables(
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Debug endpoint to check which tables exist"""
+    try:
+        result = db.execute(text("""
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+            ORDER BY table_name
+        """))
+        
+        tables = [row[0] for row in result]
+        
+        return {
+            "existing_tables": tables,
+            "total_tables": len(tables),
+            "message": f"Found {len(tables)} tables in database"
+        }
+        
+    except Exception as e:
+        return {
+            "error": str(e),
+            "message": f"Error checking tables: {str(e)}"
+        }
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True
+    )
