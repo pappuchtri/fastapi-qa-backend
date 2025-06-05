@@ -342,7 +342,7 @@ async def ask_question(
                 
                 if latest_answer:
                     generation_time = int((time.time() - start_time) * 1000)
-                    answer_type = "database_exact_match" if similarity > 0.95 else "database_adapted"
+                    answer_type = "database_cached"  # Changed from database_exact_match/database_adapted for frontend compatibility
                     
                     return {
                         "answer": latest_answer.text,
@@ -624,6 +624,105 @@ async def upload_document(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error uploading document: {str(e)}"
+        )
+
+@app.get("/qa-cache")
+async def get_qa_cache(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Get cached Q&A pairs"""
+    try:
+        # Ensure tables exist
+        Base.metadata.create_all(bind=engine)
+        
+        # Get total count safely
+        try:
+            count_result = db.execute(text("SELECT COUNT(*) FROM questions"))
+            total_count = count_result.fetchone()[0]
+        except Exception:
+            return {
+                "qa_pairs": [],
+                "total": 0,
+                "message": "Questions table not found or empty"
+            }
+        
+        if total_count == 0:
+            return {
+                "qa_pairs": [],
+                "total": 0,
+                "message": "No Q&A pairs found in database"
+            }
+        
+        # Fetch Q&A pairs
+        result = db.execute(text("""
+            SELECT q.id, q.text, q.created_at, a.text, a.confidence_score, a.created_at
+            FROM questions q
+            JOIN answers a ON q.id = a.question_id
+            ORDER BY q.created_at DESC
+            LIMIT :limit OFFSET :skip
+        """), {"limit": limit, "skip": skip})
+        
+        qa_pairs = []
+        for row in result:
+            qa_pair = {
+                "question_id": row[0],
+                "question": row[1],
+                "question_date": row[2].isoformat() if row[2] else None,
+                "answer": row[3],
+                "confidence": row[4],
+                "answer_date": row[5].isoformat() if row[5] else None
+            }
+            qa_pairs.append(qa_pair)
+        
+        return {
+            "qa_pairs": qa_pairs,
+            "total": total_count,
+            "message": f"Successfully retrieved {len(qa_pairs)} Q&A pairs"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting Q&A cache: {str(e)}")
+        return {
+            "qa_pairs": [],
+            "total": 0,
+            "message": f"Error retrieving Q&A cache: {str(e)}"
+        }
+
+@app.post("/suggest-questions")
+async def suggest_questions(
+    request: dict,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """Suggest related questions based on user input"""
+    try:
+        question_text = request.get("question", "").strip()
+        
+        if not question_text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Question cannot be empty"
+            )
+        
+        # Generate suggestions using ChatGPT
+        suggestions = await rag_service.generate_question_suggestions(question_text)
+        
+        return {
+            "original_question": question_text,
+            "suggested_questions": suggestions.get("questions", []),
+            "reasoning": suggestions.get("reasoning", "Here are some related questions you might find helpful.")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error generating question suggestions: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating question suggestions: {str(e)}"
         )
 
 @app.get("/stats")
