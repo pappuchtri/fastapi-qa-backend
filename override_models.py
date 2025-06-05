@@ -167,43 +167,41 @@ class UnansweredQuestion(Base):
     __tablename__ = "unanswered_questions"
     
     id = Column(Integer, primary_key=True, index=True)
-    question_text = Column(String, nullable=False)
-    search_attempts = Column(ARRAY(String), nullable=True)
+    question_text = Column(Text, nullable=False)
+    search_attempts = Column(JSON, nullable=True)  # Store search attempts as JSON
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved = Column(Boolean, default=False)
     resolution_notes = Column(String, nullable=True)
 
 class WebSearchResult(Base):
-    """Model for storing web search results"""
     __tablename__ = "web_search_results"
     
     id = Column(Integer, primary_key=True, index=True)
-    query = Column(String, nullable=False)
-    title = Column(String, nullable=True)
+    query = Column(Text, nullable=False)
+    title = Column(Text, nullable=True)
     snippet = Column(Text, nullable=True)
-    url = Column(String, nullable=True)
-    position = Column(Integer, nullable=True)
-    source = Column(String, nullable=True)  # e.g., "serpapi", "google_cse"
+    url = Column(String(1024), nullable=True)
+    position = Column(Integer, default=0)
+    source = Column(String(50), default="ai_native")  # ai_native, serpapi, google, bing
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationship to WebAnswer
-    answers = relationship("WebAnswer", back_populates="search_result")
+    web_answers = relationship("WebAnswer", back_populates="search_result")
 
 class WebAnswer(Base):
-    """Model for storing answers generated from web search results"""
     __tablename__ = "web_answers"
     
     id = Column(Integer, primary_key=True, index=True)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=True)
     search_result_id = Column(Integer, ForeignKey("web_search_results.id"), nullable=True)
     answer_text = Column(Text, nullable=False)
-    sources = Column(JSON, nullable=True)  # Store source URLs and titles
+    sources = Column(JSON, nullable=True)  # Store sources as JSON
     confidence_score = Column(Float, default=0.7)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
     question = relationship("Question", back_populates="web_answers")
-    search_result = relationship("WebSearchResult", back_populates="answers")
+    search_result = relationship("WebSearchResult", back_populates="web_answers")
 
 class KnowledgeBase(Base):
     """Model for the built-in knowledge base"""
