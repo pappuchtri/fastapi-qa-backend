@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Index, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Index, Float, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -21,7 +21,7 @@ class Question(Base):
     answers = relationship("Answer", back_populates="question", cascade="all, delete-orphan")
     embeddings = relationship("Embedding", back_populates="question", cascade="all, delete-orphan")
     # Add web_answers relationship but use string reference to avoid circular imports
-    web_answers = relationship("WebAnswer", back_populates="question")
+    #web_answers = relationship("WebAnswer", back_populates="question")
 
 class Answer(Base):
     __tablename__ = "answers"
@@ -70,6 +70,7 @@ class KnowledgeBase(Base):
         Index('idx_kb_priority', 'priority'),
     )
 
+# Enums
 class OverrideStatus(enum.Enum):
     ACTIVE = "active"
     SUPERSEDED = "superseded"
@@ -86,6 +87,7 @@ class UserRole(enum.Enum):
     REVIEWER = "reviewer"
     ADMIN = "admin"
 
+# User and related models
 class User(Base):
     __tablename__ = "users"
     
@@ -133,6 +135,76 @@ class AnswerReview(Base):
     # Relationships
     question = relationship("Question")
     answer = relationship("Answer")
+
+# Web search models
+class WebSearchResult(Base):
+    __tablename__ = "web_search_results"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    query = Column(Text, nullable=False)
+    title = Column(Text, nullable=True)
+    snippet = Column(Text, nullable=True)
+    url = Column(String(1024), nullable=True)
+    position = Column(Integer, default=0)
+    source = Column(String(50), default="ai_native")  # ai_native, serpapi, google, bing
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class WebAnswer(Base):
+    __tablename__ = "web_answers"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, ForeignKey("questions.id"), nullable=True)
+    search_result_id = Column(Integer, ForeignKey("web_search_results.id"), nullable=True)
+    answer_text = Column(Text, nullable=False)
+    sources = Column(JSON, nullable=True)  # Store sources as JSON
+    confidence_score = Column(Float, default=0.7)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    question = relationship("Question")
+    search_result = relationship("WebSearchResult")
+
+class UnansweredQuestion(Base):
+    """Model for tracking questions that couldn't be answered"""
+    __tablename__ = "unanswered_questions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    question_text = Column(Text, nullable=False)
+    search_attempts = Column(JSON, nullable=True)  # Store search attempts as JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved = Column(Boolean, default=False)
+    resolution_notes = Column(Text, nullable=True)
+
+# Additional tracking models
+class PerformanceCache(Base):
+    __tablename__ = "performance_cache"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    question_hash = Column(String(64), unique=True, nullable=False)  # MD5 hash of question
+    question_text = Column(Text, nullable=False)
+    cached_answer = Column(Text, nullable=False)
+    generation_time_ms = Column(Integer, nullable=False)  # Original generation time
+    confidence_score = Column(Float, nullable=False)
+    source_type = Column(String(50), nullable=False)  # document, historical, gpt
+    cache_hits = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_accessed = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)  # Optional expiration
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    action = Column(String(100), nullable=False)
+    entity_type = Column(String(100), nullable=False)  # question, answer, override, etc.
+    entity_id = Column(Integer, nullable=False)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User")
 
 # Add ReviewQueue as an alias for AnswerReview for backward compatibility
 ReviewQueue = AnswerReview
