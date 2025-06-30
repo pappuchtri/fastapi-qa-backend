@@ -116,9 +116,9 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["*"],  # Allow all origins for development
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -211,22 +211,52 @@ async def root():
         }
     }
 
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle OPTIONS requests for CORS"""
+    return {"message": "OK"}
+
+@app.get("/test")
+async def test_endpoint():
+    """Simple test endpoint that doesn't require auth - FIXED"""
+    return {
+        "status": "ok",
+        "message": "Backend is working perfectly!",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "4.0.0",
+        "cors_enabled": True,
+        "endpoints_available": [
+            "/test",
+            "/health", 
+            "/ask",
+            "/documents",
+            "/stats",
+            "/qa-cache"
+        ]
+    }
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check(db: Session = Depends(get_db)):
-    """Health check endpoint"""
+    """Health check endpoint - FIXED"""
     try:
+        # Test database connection
         db.execute(text("SELECT 1"))
         database_connected = True
-    except Exception:
+        db_message = "Database connection successful"
+    except Exception as e:
         database_connected = False
+        db_message = f"Database connection failed: {str(e)}"
     
-    return HealthResponse(
-        status="healthy",
-        message="Enhanced RAG API is running",
-        timestamp=datetime.utcnow(),
-        database_connected=database_connected,
-        openai_configured=rag_service.openai_configured
-    )
+    return {
+        "status": "healthy" if database_connected else "degraded",
+        "message": "Enhanced RAG API is running",
+        "timestamp": datetime.utcnow().isoformat(),
+        "database_connected": database_connected,
+        "database_message": db_message,
+        "openai_configured": rag_service.openai_configured,
+        "api_version": "4.0.0",
+        "cors_enabled": True
+    }
 
 @app.post("/ask")
 async def ask_question(
