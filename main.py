@@ -635,60 +635,132 @@ async def get_qa_cache(
 ):
     """Get cached Q&A pairs"""
     try:
+        logger.info(f"📊 Fetching Q&A cache data (skip={skip}, limit={limit})")
+        
         # Ensure tables exist
-        Base.metadata.create_all(bind=engine)
+        try:
+            Base.metadata.create_all(bind=engine)
+            logger.info("✅ Database tables verified/created")
+        except Exception as e:
+            logger.error(f"❌ Error creating database tables: {str(e)}")
+            return {
+                "qa_pairs": [],
+                "total": 0,
+                "message": f"Database table creation failed: {str(e)}"
+            }
+        
+        # Test database connection
+        try:
+            db.execute(text("SELECT 1"))
+            logger.info("✅ Database connection verified")
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {str(e)}")
+            return {
+                "qa_pairs": [],
+                "total": 0,
+                "message": f"Database connection failed: {str(e)}"
+            }
+        
+        # Check if tables exist
+        try:
+            # Check if questions table exists
+            questions_exists = db.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'questions'
+                )
+            """)).fetchone()[0]
+            
+            # Check if answers table exists  
+            answers_exists = db.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'answers'
+                )
+            """)).fetchone()[0]
+            
+            if not questions_exists or not answers_exists:
+                logger.warning(f"⚠️ Missing tables - questions: {questions_exists}, answers: {answers_exists}")
+                return {
+                    "qa_pairs": [],
+                    "total": 0,
+                    "message": f"Required tables missing - questions: {questions_exists}, answers: {answers_exists}"
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Error checking table existence: {str(e)}")
+            # Fallback - try to get count anyway
+            pass
         
         # Get total count safely
         try:
             count_result = db.execute(text("SELECT COUNT(*) FROM questions"))
             total_count = count_result.fetchone()[0]
-        except Exception:
+            logger.info(f"📊 Found {total_count} questions in database")
+        except Exception as e:
+            logger.error(f"❌ Error counting questions: {str(e)}")
             return {
                 "qa_pairs": [],
                 "total": 0,
-                "message": "Questions table not found or empty"
+                "message": f"Error counting questions: {str(e)}"
             }
         
         if total_count == 0:
+            logger.info("📊 No Q&A pairs found in database")
             return {
                 "qa_pairs": [],
                 "total": 0,
                 "message": "No Q&A pairs found in database"
             }
         
-        # Fetch Q&A pairs
-        result = db.execute(text("""
-            SELECT q.id, q.text, q.created_at, a.text, a.confidence_score, a.created_at
-            FROM questions q
-            JOIN answers a ON q.id = a.question_id
-            ORDER BY q.created_at DESC
-            LIMIT :limit OFFSET :skip
-        """), {"limit": limit, "skip": skip})
-        
-        qa_pairs = []
-        for row in result:
-            qa_pair = {
-                "question_id": row[0],
-                "question": row[1],
-                "question_date": row[2].isoformat() if row[2] else None,
-                "answer": row[3],
-                "confidence": row[4],
-                "answer_date": row[5].isoformat() if row[5] else None
+        # Fetch Q&A pairs with better error handling
+        try:
+            result = db.execute(text("""
+                SELECT q.id, q.text, q.created_at, a.text, a.confidence_score, a.created_at
+                FROM questions q
+                JOIN answers a ON q.id = a.question_id
+                ORDER BY q.created_at DESC
+                LIMIT :limit OFFSET :skip
+            """), {"limit": limit, "skip": skip})
+            
+            qa_pairs = []
+            for row in result:
+                try:
+                    qa_pair = {
+                        "question_id": row[0],
+                        "question": row[1],
+                        "question_date": row[2].isoformat() if row[2] else None,
+                        "answer": row[3],
+                        "confidence": row[4] if row[4] is not None else 0.0,
+                        "answer_date": row[5].isoformat() if row[5] else None
+                    }
+                    qa_pairs.append(qa_pair)
+                except Exception as row_error:
+                    logger.error(f"❌ Error processing row: {str(row_error)}")
+                    continue
+            
+            logger.info(f"✅ Successfully retrieved {len(qa_pairs)} Q&A pairs")
+            return {
+                "qa_pairs": qa_pairs,
+                "total": total_count,
+                "message": f"Successfully retrieved {len(qa_pairs)} Q&A pairs"
             }
-            qa_pairs.append(qa_pair)
-        
-        return {
-            "qa_pairs": qa_pairs,
-            "total": total_count,
-            "message": f"Successfully retrieved {len(qa_pairs)} Q&A pairs"
-        }
+            
+        except Exception as e:
+            logger.error(f"❌ Error executing Q&A query: {str(e)}")
+            return {
+                "qa_pairs": [],
+                "total": total_count,
+                "message": f"Error retrieving Q&A pairs: {str(e)}"
+            }
         
     except Exception as e:
-        print(f"❌ Error getting Q&A cache: {str(e)}")
+        logger.error(f"❌ Unexpected error in get_qa_cache: {str(e)}")
+        logger.error(f"❌ Error traceback: {traceback.format_exc()}")
         return {
             "qa_pairs": [],
             "total": 0,
-            "message": f"Error retrieving Q&A cache: {str(e)}"
+            "message": f"Unexpected error retrieving Q&A cache: {str(e)}"
         }
 
 @app.post("/suggest-questions")
@@ -732,39 +804,55 @@ async def get_stats(
 ):
     """Get API statistics"""
     try:
+        logger.info("📊 Fetching API statistics")
+        
+        # Ensure tables exist first
+        try:
+            Base.metadata.create_all(bind=engine)
+            logger.info("✅ Database tables verified for stats")
+        except Exception as e:
+            logger.error(f"❌ Error creating tables for stats: {str(e)}")
+        
         # Use safe queries with error handling
+        stats_data = {}
+        
         try:
             question_count = db.execute(text("SELECT COUNT(*) FROM questions")).fetchone()[0]
-        except:
-            question_count = 0
+            stats_data["questions"] = question_count
+        except Exception as e:
+            logger.error(f"❌ Error counting questions: {str(e)}")
+            stats_data["questions"] = 0
             
         try:
             answer_count = db.execute(text("SELECT COUNT(*) FROM answers")).fetchone()[0]
-        except:
-            answer_count = 0
+            stats_data["answers"] = answer_count
+        except Exception as e:
+            logger.error(f"❌ Error counting answers: {str(e)}")
+            stats_data["answers"] = 0
             
         try:
             document_count = db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0]
-        except:
-            document_count = 0
+            stats_data["documents"] = document_count
+        except Exception as e:
+            logger.error(f"❌ Error counting documents: {str(e)}")
+            stats_data["documents"] = 0
             
         try:
             chunk_count = db.execute(text("SELECT COUNT(*) FROM document_chunks")).fetchone()[0]
-        except:
-            chunk_count = 0
+            stats_data["chunks"] = chunk_count
+        except Exception as e:
+            logger.error(f"❌ Error counting chunks: {str(e)}")
+            stats_data["chunks"] = 0
         
         # Get knowledge base stats safely
         try:
             kb_stats = kb_service.get_stats(db)
+            stats_data["knowledge_base"] = kb_stats
         except Exception as e:
-            kb_stats = {"total_entries": 0, "categories": 0}
+            logger.error(f"❌ Error getting knowledge base stats: {str(e)}")
+            stats_data["knowledge_base"] = {"total_entries": 0, "categories": 0}
         
-        return {
-            "questions": question_count,
-            "answers": answer_count,
-            "documents": document_count,
-            "chunks": chunk_count,
-            "knowledge_base": kb_stats,
+        stats_data.update({
             "openai_configured": rag_service.openai_configured,
             "version": "4.0.0 - Enhanced RAG System",
             "response_priority": [
@@ -773,10 +861,14 @@ async def get_stats(
                 "3. Q&A Database Cache",
                 "4. ChatGPT Generation"
             ]
-        }
+        })
+        
+        logger.info(f"✅ Stats retrieved successfully: {stats_data}")
+        return stats_data
         
     except Exception as e:
-        print(f"❌ Error getting stats: {str(e)}")
+        logger.error(f"❌ Unexpected error getting stats: {str(e)}")
+        logger.error(f"❌ Error traceback: {traceback.format_exc()}")
         return {
             "questions": 0,
             "answers": 0,
